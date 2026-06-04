@@ -21,6 +21,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -197,22 +199,79 @@ func (h *ProcUptime) readUptime(
 	// /proc/uptime, the embedding container has been fully initialized,
 	// so Ctime() is already holding a valid value.
 	//
-	data := cntr.Ctime()
+	ctime := cntr.Ctime()
 
 	// Calculate container's uptime, convert it to float to obtain required
 	// precission (as per host FS), and finally format it into string for
 	// storage purposes.
 	//
-	// TODO: Notice that we are dumping the same values into the two columns
-	// expected in /proc/uptime. The value utilized for the first column is
-	// an accurate one (uptime seconds); however, the second one is just
-	// an approximation.
+	// The first column in /proc/uptime is uptime in seconds, while the second
+	// column is cumulative CPU idle time. The host's idle/uptime ratio gives us
+	// a better approximation of the container's idle time than mirroring the
+	// uptime value, especially on multi-core hosts where idle time can exceed
+	// elapsed uptime.
 	//
-	uptimeDur := time.Now().Sub(data) / time.Nanosecond
-	var uptime float64 = uptimeDur.Seconds()
-	uptimeStr := fmt.Sprintf("%.2f %.2f\n", uptime, uptime)
+	uptime := containerUptime(ctime, time.Now())
+	idle := uptime
+
+	hostUptime, hostIdle, err := readHostUptime()
+	if err != nil {
+		logrus.Warnf("Unable to read host /proc/uptime: %s", err)
+	} else {
+		idle = containerIdleApprox(uptime, hostUptime, hostIdle)
+	}
+
+	uptimeStr := fmt.Sprintf("%.2f %.2f\n", uptime, idle)
 
 	req.Data = []byte(uptimeStr)
 
 	return len(req.Data), nil
+}
+
+func containerUptime(ctime, now time.Time) float64 {
+	if now.Before(ctime) {
+		return 0
+	}
+
+	return now.Sub(ctime).Seconds()
+}
+
+func containerIdleApprox(uptime, hostUptime, hostIdle float64) float64 {
+	if uptime <= 0 {
+		return 0
+	}
+
+	if hostUptime <= 0 || hostIdle < 0 {
+		return uptime
+	}
+
+	return uptime * (hostIdle / hostUptime)
+}
+
+func readHostUptime() (float64, float64, error) {
+	data, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return parseProcUptime(string(data))
+}
+
+func parseProcUptime(data string) (float64, float64, error) {
+	fields := strings.Fields(data)
+	if len(fields) < 2 {
+		return 0, 0, fmt.Errorf("invalid /proc/uptime content: %q", data)
+	}
+
+	uptime, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	idle, err := strconv.ParseFloat(fields[1], 64)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return uptime, idle, nil
 }
