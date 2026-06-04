@@ -206,20 +206,13 @@ func (h *ProcUptime) readUptime(
 	// storage purposes.
 	//
 	// The first column in /proc/uptime is uptime in seconds, while the second
-	// column is cumulative CPU idle time. The host's idle/uptime ratio gives us
-	// a better approximation of the container's idle time than mirroring the
-	// uptime value, especially on multi-core hosts where idle time can exceed
-	// elapsed uptime.
+	// column is cumulative CPU idle time. Rather than reading the host's
+	// /proc/uptime (which may be intercepted by sysbox-fs itself in the FUSE
+	// mount context), we approximate idle time from the container's own CPU
+	// cgroup stats, with a fallback to uptime if cgroup data is unavailable.
 	//
 	uptime := containerUptime(ctime, time.Now())
-	idle := uptime
-
-	hostUptime, hostIdle, err := readHostUptime()
-	if err != nil {
-		logrus.Warnf("Unable to read host /proc/uptime: %s", err)
-	} else {
-		idle = containerIdleApprox(uptime, hostUptime, hostIdle)
-	}
+	idle := containerIdleFromCgroup(cntr, uptime)
 
 	uptimeStr := fmt.Sprintf("%.2f %.2f\n", uptime, idle)
 
@@ -236,42 +229,93 @@ func containerUptime(ctime, now time.Time) float64 {
 	return now.Sub(ctime).Seconds()
 }
 
-func containerIdleApprox(uptime, hostUptime, hostIdle float64) float64 {
+// containerIdleFromCgroup reads the container's CPU cgroup stats to calculate
+// idle time. For cgroupv2 it reads cpu.stat ("usage_usec" field). For cgroupv1
+// it reads cpuacct.usage (nanoseconds). Falls back to uptime if cgroup data
+// is unavailable or unreadable.
+func containerIdleFromCgroup(cntr domain.ContainerIface, uptime float64) float64 {
 	if uptime <= 0 {
 		return 0
 	}
 
-	if hostUptime <= 0 || hostIdle < 0 {
+	if cntr == nil {
 		return uptime
 	}
 
-	return uptime * (hostIdle / hostUptime)
-}
+	pid := cntr.InitPid()
+	if pid == 0 {
+		return uptime
+	}
 
-func readHostUptime() (float64, float64, error) {
-	data, err := os.ReadFile("/proc/uptime")
+	// Read /proc/<pid>/cgroup to find the container's cgroup path.
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
 	if err != nil {
-		return 0, 0, err
+		return uptime
 	}
 
-	return parseProcUptime(string(data))
-}
+	var v2Path string
+	var v1CpuacctPath string
 
-func parseProcUptime(data string) (float64, float64, error) {
-	fields := strings.Fields(data)
-	if len(fields) < 2 {
-		return 0, 0, fmt.Errorf("invalid /proc/uptime content: %q", data)
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		// cgroupv2: third field has no controller name (empty)
+		if parts[1] == "" {
+			v2Path = filepath.Clean(parts[2])
+			continue
+		}
+		// cgroupv1: look for cpuacct controller
+		for _, ctrl := range strings.Split(parts[1], ",") {
+			if ctrl == "cpuacct" {
+				v1CpuacctPath = filepath.Clean(parts[2])
+			}
+		}
 	}
 
-	uptime, err := strconv.ParseFloat(fields[0], 64)
-	if err != nil {
-		return 0, 0, err
+	// cgroupv2: read cpu.stat and parse usage_usec (microseconds).
+	if v2Path != "" {
+		cpuStat, err := os.ReadFile(filepath.Join("/sys/fs/cgroup", v2Path, "cpu.stat"))
+		if err == nil {
+			for _, line := range strings.Split(strings.TrimSpace(string(cpuStat)), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) == 2 && fields[0] == "usage_usec" {
+					usageUsec, err := strconv.ParseUint(fields[1], 10, 64)
+					if err == nil {
+						cpuSeconds := float64(usageUsec) / 1_000_000
+						idle := uptime - cpuSeconds
+						if idle < 0 {
+							idle = 0
+						}
+						return idle
+					}
+				}
+			}
+		}
 	}
 
-	idle, err := strconv.ParseFloat(fields[1], 64)
-	if err != nil {
-		return 0, 0, err
+	// cgroupv1: read cpuacct.usage (nanoseconds).
+	if v1CpuacctPath != "" {
+		candidates := []string{
+			filepath.Join("/sys/fs/cgroup", "cpuacct", v1CpuacctPath, "cpuacct.usage"),
+			filepath.Join("/sys/fs/cgroup", v1CpuacctPath, "cpuacct.usage"),
+		}
+		for _, path := range candidates {
+			cpuUsage, err := os.ReadFile(path)
+			if err == nil {
+				usageNs, err := strconv.ParseUint(strings.TrimSpace(string(cpuUsage)), 10, 64)
+				if err == nil {
+					cpuSeconds := float64(usageNs) / 1_000_000_000
+					idle := uptime - cpuSeconds
+					if idle < 0 {
+						idle = 0
+					}
+					return idle
+				}
+			}
+		}
 	}
 
-	return uptime, idle, nil
+	return uptime
 }

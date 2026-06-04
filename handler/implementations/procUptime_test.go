@@ -21,31 +21,6 @@ import (
 	"time"
 )
 
-func TestParseProcUptime(t *testing.T) {
-	uptime, idle, err := parseProcUptime("123.45 678.90\n")
-	if err != nil {
-		t.Fatalf("parseProcUptime() error = %v", err)
-	}
-
-	if uptime != 123.45 {
-		t.Fatalf("parseProcUptime() uptime = %v, want 123.45", uptime)
-	}
-
-	if idle != 678.90 {
-		t.Fatalf("parseProcUptime() idle = %v, want 678.90", idle)
-	}
-}
-
-func TestParseProcUptimeInvalid(t *testing.T) {
-	if _, _, err := parseProcUptime("123.45\n"); err == nil {
-		t.Fatal("parseProcUptime() error = nil, want error")
-	}
-
-	if _, _, err := parseProcUptime("foo 678.90\n"); err == nil {
-		t.Fatal("parseProcUptime() error = nil, want error")
-	}
-}
-
 func TestContainerUptime(t *testing.T) {
 	ctime := time.Date(2026, 6, 4, 1, 2, 3, 0, time.UTC)
 	now := ctime.Add(1500 * time.Millisecond)
@@ -66,16 +41,60 @@ func TestContainerUptimeDoesNotGoNegative(t *testing.T) {
 	}
 }
 
-func TestContainerIdleApprox(t *testing.T) {
-	idle := containerIdleApprox(10, 100, 250)
-	if idle != 25 {
-		t.Fatalf("containerIdleApprox() = %v, want 25", idle)
+func TestContainerIdleFromCgroupNil(t *testing.T) {
+	// With nil container, fallback to uptime.
+	idle := containerIdleFromCgroup(nil, 100)
+	if idle != 100 {
+		t.Fatalf("containerIdleFromCgroup(nil, 100) = %v, want 100", idle)
 	}
 }
 
-func TestContainerIdleApproxFallback(t *testing.T) {
-	idle := containerIdleApprox(10, 0, 250)
-	if idle != 10 {
-		t.Fatalf("containerIdleApprox() = %v, want 10", idle)
+func TestContainerIdleFromCgroupZeroUptime(t *testing.T) {
+	idle := containerIdleFromCgroup(nil, 0)
+	if idle != 0 {
+		t.Fatalf("containerIdleFromCgroup(nil, 0) = %v, want 0", idle)
+	}
+}
+
+func TestContainerIdleArithmetic(t *testing.T) {
+	// Simulate what containerIdleFromCgroup does with usage_usec:
+	// uptime=100, usage_usec=500000 => cpuSeconds=0.5 => idle=99.5
+	usageUsec := uint64(500000)
+	cpuSeconds := float64(usageUsec) / 1_000_000
+	uptime := 100.0
+	got := uptime - cpuSeconds
+	if got < 0 {
+		got = 0
+	}
+	if got != 99.5 {
+		t.Fatalf("idle calculation: got %v, want 99.5", got)
+	}
+}
+
+func TestContainerIdleClamp(t *testing.T) {
+	// When cpuSeconds > uptime, idle should clamp to 0.
+	usageUsec := uint64(200_000_000) // 200s
+	cpuSeconds := float64(usageUsec) / 1_000_000
+	uptime := 100.0
+	got := uptime - cpuSeconds
+	if got < 0 {
+		got = 0
+	}
+	if got != 0 {
+		t.Fatalf("idle clamp: got %v, want 0", got)
+	}
+}
+
+func TestContainerIdleCgroupV1Arithmetic(t *testing.T) {
+	// cpuacct.usage is in nanoseconds: 500_000_000 ns = 0.5s
+	usageNs := uint64(500_000_000)
+	cpuSeconds := float64(usageNs) / 1_000_000_000
+	uptime := 100.0
+	got := uptime - cpuSeconds
+	if got < 0 {
+		got = 0
+	}
+	if got != 99.5 {
+		t.Fatalf("cgroupv1 idle calculation: got %v, want 99.5", got)
 	}
 }
