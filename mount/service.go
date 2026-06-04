@@ -37,12 +37,21 @@ import (
 //   stall its FSM.
 
 var ProcfsMounts = []string{
+	"/proc/cpuinfo",
+	"/proc/diskstats",
+	"/proc/meminfo",
+	"/proc/stat",
+	"/proc/slabinfo",
+	"/proc/pressure/io",
+	"/proc/pressure/cpu",
+	"/proc/pressure/memory",
 	"/proc/uptime",
 	"/proc/swaps",
 	"/proc/sys",
 }
 
 var SysfsMounts = []string{
+	"/sys/devices/system/cpu/online",
 	"/sys/kernel",
 	"/sys/devices/virtual",
 	"/sys/module/nf_conntrack/parameters",

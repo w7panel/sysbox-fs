@@ -41,6 +41,15 @@ import (
 var DefaultHandlers = []domain.HandlerIface{
 	implementations.PassThrough_Handler,                    // *
 	implementations.Root_Handler,                           // /
+	implementations.ProcCpuinfo_Handler,                    // /proc/cpuinfo
+	implementations.ProcDiskstats_Handler,                  // /proc/diskstats
+	implementations.ProcMeminfo_Handler,                    // /proc/meminfo
+	implementations.ProcStat_Handler,                       // /proc/stat
+	implementations.ProcSlabinfo_Handler,                   // /proc/slabinfo
+	implementations.ProcPressure_Handler,                   // /proc/pressure
+	implementations.ProcPressureIO_Handler,                 // /proc/pressure/io
+	implementations.ProcPressureCPU_Handler,                // /proc/pressure/cpu
+	implementations.ProcPressureMemory_Handler,             // /proc/pressure/memory
 	implementations.ProcUptime_Handler,                     // /proc/uptime
 	implementations.ProcSwaps_Handler,                      // /proc/swaps
 	implementations.ProcSys_Handler,                        // /proc/sys
@@ -59,6 +68,7 @@ var DefaultHandlers = []domain.HandlerIface{
 	implementations.SysDevicesVirtual_Handler,              // /sys/devices/virtual
 	implementations.SysDevicesVirtualDmi_Handler,           // /sys/devices/virtual/dmi
 	implementations.SysDevicesVirtualDmiId_Handler,         // /sys/devices/virtual/dmi/id
+	implementations.SysDevicesSystemCpuOnline_Handler,      // /sys/devices/system/cpu/online
 	implementations.SysModuleNfconntrackParameters_Handler, // /sys/module/nf_conntrack/parameters
 }
 
