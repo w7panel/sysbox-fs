@@ -541,12 +541,37 @@ func memoryLimit(cg cgroupView) (uint64, bool) {
 }
 
 func memoryUsage(cg cgroupView) (uint64, bool) {
-	if v, ok := cg.readV2Effective("memory.current", func(s string) bool {
-		return s != ""
-	}); ok {
+	if v, ok := cg.readV2MemoryUsage(); ok {
 		return parseUintValue(v)
 	}
 	return parseUintValueFromV1(cg, "memory", "memory.usage_in_bytes")
+}
+
+func (c cgroupView) readV2MemoryUsage() (string, bool) {
+	return readV2MemoryUsageFrom("/sys/fs/cgroup", c.v2Path)
+}
+
+func readV2MemoryUsageFrom(base, v2Path string) (string, bool) {
+	if v2Path == "" {
+		return "", false
+	}
+
+	fallback, fallbackOk := readFirstExisting(filepath.Join(base, v2Path, "memory.current"))
+	cgPath := filepath.Clean(v2Path)
+	for {
+		max, ok := readFirstExisting(filepath.Join(base, cgPath, "memory.max"))
+		if ok && max != "" && max != "max" {
+			if usage, usageOk := readFirstExisting(filepath.Join(base, cgPath, "memory.current")); usageOk {
+				return usage, true
+			}
+		}
+		if cgPath == "." || cgPath == "/" {
+			break
+		}
+		cgPath = filepath.Dir(cgPath)
+	}
+
+	return fallback, fallbackOk
 }
 
 func parseUintValueFromV1(cg cgroupView, ctrl, name string) (uint64, bool) {
