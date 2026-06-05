@@ -155,6 +155,38 @@ func TestDiskstatsFromIOStat(t *testing.T) {
 	}
 }
 
+func TestParseBlkIOValues(t *testing.T) {
+	values := parseBlkIOValues("8:0 Read 10\n8:0 Write 20\nTotal 30\n")
+
+	if values["8:0"]["Read"] != 10 {
+		t.Fatalf("Read = %d, want 10", values["8:0"]["Read"])
+	}
+	if values["8:0"]["Write"] != 20 {
+		t.Fatalf("Write = %d, want 20", values["8:0"]["Write"])
+	}
+	if _, ok := values["Total"]; ok {
+		t.Fatal("parseBlkIOValues() kept aggregate Total line")
+	}
+}
+
+func TestParseMemoryStatPrefersTotalValues(t *testing.T) {
+	stat := parseMemoryStat("active_anon 1024\ntotal_active_anon 2048\nfile 4096\n", true)
+
+	if got := stat.kb("active_anon"); got != 2 {
+		t.Fatalf("active_anon = %dKB, want 2KB", got)
+	}
+	if got := stat.kb("file"); got != 4 {
+		t.Fatalf("file = %dKB, want 4KB", got)
+	}
+}
+
+func TestContainerProcStatsMissingRoot(t *testing.T) {
+	total, running, lastPID, ok := containerProcStats(-1)
+	if ok {
+		t.Fatalf("containerProcStats(-1) = (%d, %d, %d, true), want ok=false", total, running, lastPID)
+	}
+}
+
 func TestEnsureTrailingNewline(t *testing.T) {
 	if got := ensureTrailingNewline("some avg10=0.00"); got != "some avg10=0.00\n" {
 		t.Fatalf("ensureTrailingNewline() = %q", got)

@@ -410,6 +410,9 @@ func readDiskstats(req *domain.HandlerRequest) ([]byte, error) {
 	if data, ok := cg.readV2("io.stat"); ok && data != "" {
 		return diskstatsFromIOStat(data), nil
 	}
+	if data, ok := diskstatsFromBlkIO(cg); ok {
+		return data, nil
+	}
 	return []byte{}, nil
 }
 
@@ -719,38 +722,109 @@ func readMemInfo(req *domain.HandlerRequest) ([]byte, error) {
 	if swapTotal > swapUsed {
 		swapFree = swapTotal - swapUsed
 	}
+	memStat := memoryStatValues(cg)
 	out := bytes.Buffer{}
+	memAvailable := availKB + memStat.kb("active_file") + memStat.kb("inactive_file") + memStat.kb("slab_reclaimable")
+	if memAvailable > totalKB {
+		memAvailable = totalKB
+	}
 	writeMemLine(&out, "MemTotal", totalKB)
 	writeMemLine(&out, "MemFree", availKB)
-	writeMemLine(&out, "MemAvailable", availKB)
+	writeMemLine(&out, "MemAvailable", memAvailable)
 	writeMemLine(&out, "Buffers", 0)
-	writeMemLine(&out, "Cached", minHost(host, "Cached", availKB))
+	writeMemLine(&out, "Cached", memStat.kbOrHost("file", host, "Cached", availKB))
 	writeMemLine(&out, "SwapCached", 0)
-	writeMemLine(&out, "Active", minHost(host, "Active", usedKB))
-	writeMemLine(&out, "Inactive", minHost(host, "Inactive", usedKB))
-	writeMemLine(&out, "Active(anon)", minHost(host, "Active(anon)", usedKB))
-	writeMemLine(&out, "Inactive(anon)", minHost(host, "Inactive(anon)", usedKB))
-	writeMemLine(&out, "Active(file)", minHost(host, "Active(file)", availKB))
-	writeMemLine(&out, "Inactive(file)", minHost(host, "Inactive(file)", availKB))
-	writeMemLine(&out, "Unevictable", minHost(host, "Unevictable", usedKB))
+	writeMemLine(&out, "Active", memStat.kbSumOrHost([]string{"active_anon", "active_file"}, host, "Active", usedKB))
+	writeMemLine(&out, "Inactive", memStat.kbSumOrHost([]string{"inactive_anon", "inactive_file"}, host, "Inactive", usedKB))
+	writeMemLine(&out, "Active(anon)", memStat.kbOrHost("active_anon", host, "Active(anon)", usedKB))
+	writeMemLine(&out, "Inactive(anon)", memStat.kbOrHost("inactive_anon", host, "Inactive(anon)", usedKB))
+	writeMemLine(&out, "Active(file)", memStat.kbOrHost("active_file", host, "Active(file)", availKB))
+	writeMemLine(&out, "Inactive(file)", memStat.kbOrHost("inactive_file", host, "Inactive(file)", availKB))
+	writeMemLine(&out, "Unevictable", memStat.kbOrHost("unevictable", host, "Unevictable", usedKB))
 	writeMemLine(&out, "Mlocked", minHost(host, "Mlocked", usedKB))
 	writeMemLine(&out, "SwapTotal", swapTotal/1024)
 	writeMemLine(&out, "SwapFree", swapFree/1024)
-	writeMemLine(&out, "Dirty", minHost(host, "Dirty", usedKB))
-	writeMemLine(&out, "Writeback", minHost(host, "Writeback", usedKB))
-	writeMemLine(&out, "AnonPages", minHost(host, "AnonPages", usedKB))
-	writeMemLine(&out, "Mapped", minHost(host, "Mapped", usedKB))
-	writeMemLine(&out, "Shmem", minHost(host, "Shmem", usedKB))
+	writeMemLine(&out, "Dirty", memStat.kbOrHost("file_dirty", host, "Dirty", usedKB))
+	writeMemLine(&out, "Writeback", memStat.kbOrHost("file_writeback", host, "Writeback", usedKB))
+	writeMemLine(&out, "AnonPages", memStat.kbOrHost("anon", host, "AnonPages", usedKB))
+	writeMemLine(&out, "Mapped", memStat.kbOrHost("file_mapped", host, "Mapped", usedKB))
+	writeMemLine(&out, "Shmem", memStat.kbOrHost("shmem", host, "Shmem", usedKB))
 	writeMemLine(&out, "KReclaimable", minHost(host, "KReclaimable", usedKB))
-	writeMemLine(&out, "Slab", minHost(host, "Slab", usedKB))
-	writeMemLine(&out, "SReclaimable", minHost(host, "SReclaimable", usedKB))
-	writeMemLine(&out, "SUnreclaim", minHost(host, "SUnreclaim", usedKB))
-	writeMemLine(&out, "KernelStack", minHost(host, "KernelStack", usedKB))
-	writeMemLine(&out, "PageTables", minHost(host, "PageTables", usedKB))
+	writeMemLine(&out, "Slab", memStat.kbOrHost("slab", host, "Slab", usedKB))
+	writeMemLine(&out, "SReclaimable", memStat.kbOrHost("slab_reclaimable", host, "SReclaimable", usedKB))
+	writeMemLine(&out, "SUnreclaim", memStat.kbOrHost("slab_unreclaimable", host, "SUnreclaim", usedKB))
+	writeMemLine(&out, "KernelStack", memStat.kbOrHost("kernel_stack", host, "KernelStack", usedKB))
+	writeMemLine(&out, "PageTables", memStat.kbOrHost("pagetables", host, "PageTables", usedKB))
 	writeMemLine(&out, "NFS_Unstable", 0)
 	writeMemLine(&out, "Bounce", 0)
 	writeMemLine(&out, "WritebackTmp", 0)
+	writeMemLine(&out, "AnonHugePages", memStat.kbOrHost("anon_thp", host, "AnonHugePages", usedKB))
+	writeMemLine(&out, "ShmemHugePages", 0)
+	writeMemLine(&out, "ShmemPmdMapped", 0)
 	return out.Bytes(), nil
+}
+
+type memoryStat map[string]uint64
+
+func memoryStatValues(cg cgroupView) memoryStat {
+	if data, ok := cg.readV2("memory.stat"); ok {
+		return parseMemoryStat(data, false)
+	}
+	if data, ok := cg.readV1("memory", "memory.stat"); ok {
+		return parseMemoryStat(data, true)
+	}
+	return memoryStat{}
+}
+
+func parseMemoryStat(data string, preferTotal bool) memoryStat {
+	values := memoryStat{}
+	for _, line := range strings.Split(data, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		v, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		key := fields[0]
+		if preferTotal && strings.HasPrefix(key, "total_") {
+			key = strings.TrimPrefix(key, "total_")
+		}
+		if _, exists := values[key]; !exists || strings.HasPrefix(fields[0], "total_") {
+			values[key] = v
+		}
+		if key == "rss_huge" {
+			values["anon_thp"] = v
+		}
+	}
+	return values
+}
+
+func (m memoryStat) kb(key string) uint64 {
+	return m[key] / 1024
+}
+
+func (m memoryStat) kbOrHost(key string, host map[string]uint64, hostKey string, max uint64) uint64 {
+	if v, ok := m[key]; ok {
+		return v / 1024
+	}
+	return minHost(host, hostKey, max)
+}
+
+func (m memoryStat) kbSumOrHost(keys []string, host map[string]uint64, hostKey string, max uint64) uint64 {
+	sum := uint64(0)
+	found := false
+	for _, key := range keys {
+		if v, ok := m[key]; ok {
+			sum += v
+			found = true
+		}
+	}
+	if found {
+		return sum / 1024
+	}
+	return minHost(host, hostKey, max)
 }
 
 func parseHostMeminfo() (map[string]uint64, error) {
@@ -877,27 +951,45 @@ func readPressure(name string) resourceReader {
 }
 
 func readLoadavg(req *domain.HandlerRequest) ([]byte, error) {
-	total, lastPID := visibleProcessStats(req)
+	total, running, lastPID := visibleProcessStats(req)
 	if total == 0 {
 		total = 1
 	}
-	return []byte(fmt.Sprintf("0.00 0.00 0.00 1/%d %d\n", total, lastPID)), nil
+	if running == 0 {
+		running = 1
+	}
+	if running > total {
+		total = running
+	}
+	return []byte(fmt.Sprintf("0.00 0.00 0.00 %d/%d %d\n", running, total, lastPID)), nil
 }
 
-func visibleProcessStats(req *domain.HandlerRequest) (int, int) {
+func visibleProcessStats(req *domain.HandlerRequest) (int, int, int) {
+	if req.Pid != 0 {
+		if total, running, lastPID, ok := samePIDNamespaceStats(int(req.Pid)); ok {
+			return total, running, lastPID
+		}
+	}
 	if req.Container != nil && req.Container.InitPid() != 0 {
+		if total, running, lastPID, ok := samePIDNamespaceStats(int(req.Container.InitPid())); ok {
+			return total, running, lastPID
+		}
+		if total, running, lastPID, ok := containerProcStats(int(req.Container.InitPid())); ok {
+			return total, running, lastPID
+		}
 		count := descendantProcessCount(int(req.Container.InitPid()))
 		if count > 0 {
-			return count, count
+			return count, 1, count
 		}
 	}
 
 	target := cgroupForReq(req)
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return 0, 0
+		return 0, 0, 0
 	}
 	count := 0
+	running := 0
 	lastPID := 0
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -915,8 +1007,94 @@ func visibleProcessStats(req *domain.HandlerRequest) (int, int) {
 		if nsPID > lastPID {
 			lastPID = nsPID
 		}
+		if state, ok := procState(filepath.Join("/proc", entry.Name(), "status")); ok && state == "R" {
+			running++
+		}
 	}
-	return count, lastPID
+	return count, running, lastPID
+}
+
+func samePIDNamespaceStats(initPID int) (int, int, int, bool) {
+	initNS, err := os.Readlink(fmt.Sprintf("/proc/%d/ns/pid", initPID))
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0, 0, 0, false
+	}
+
+	total := 0
+	running := 0
+	lastPID := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		hostPID, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		ns, err := os.Readlink(filepath.Join("/proc", entry.Name(), "ns/pid"))
+		if err != nil || ns != initNS {
+			continue
+		}
+		total++
+		nsPID := namespacePID(hostPID)
+		if nsPID > lastPID {
+			lastPID = nsPID
+		}
+		if state, ok := procState(filepath.Join("/proc", entry.Name(), "status")); ok && state == "R" {
+			running++
+		}
+	}
+	return total, running, lastPID, total > 0
+}
+
+func containerProcStats(initPID int) (int, int, int, bool) {
+	entries, err := os.ReadDir(fmt.Sprintf("/proc/%d/root/proc", initPID))
+	if err != nil {
+		return 0, 0, 0, false
+	}
+
+	total := 0
+	running := 0
+	lastPID := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		total++
+		if pid > lastPID {
+			lastPID = pid
+		}
+		state, ok := procState(filepath.Join("/proc", strconv.Itoa(initPID), "root/proc", entry.Name(), "status"))
+		if ok && state == "R" {
+			running++
+		}
+	}
+	return total, running, lastPID, total > 0
+}
+
+func procState(statusPath string) (string, bool) {
+	data, err := os.ReadFile(statusPath)
+	if err != nil {
+		return "", false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "State:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			return fields[1], true
+		}
+	}
+	return "", false
 }
 
 func descendantProcessCount(initPID int) int {
@@ -1075,6 +1253,119 @@ func diskstatsFromIOStat(data string) []byte {
 			values["dios"], discardSectors))
 	}
 	return out.Bytes()
+}
+
+type blkIOStats struct {
+	serviced     map[string]map[string]uint64
+	merged       map[string]map[string]uint64
+	serviceBytes map[string]map[string]uint64
+	waitTime     map[string]map[string]uint64
+	serviceTime  map[string]map[string]uint64
+}
+
+func diskstatsFromBlkIO(cg cgroupView) ([]byte, bool) {
+	stats := blkIOStats{
+		serviced:     readBlkIOValues(cg, "blkio.throttle.io_serviced", "blkio.io_serviced"),
+		merged:       readBlkIOValues(cg, "blkio.io_merged"),
+		serviceBytes: readBlkIOValues(cg, "blkio.throttle.io_service_bytes", "blkio.io_service_bytes"),
+		waitTime:     readBlkIOValues(cg, "blkio.io_wait_time"),
+		serviceTime:  readBlkIOValues(cg, "blkio.io_service_time"),
+	}
+	if len(stats.serviced) == 0 && len(stats.serviceBytes) == 0 {
+		return nil, false
+	}
+
+	devNames := diskstatsDeviceNames()
+	out := bytes.Buffer{}
+	for dev := range mergeBlkIODevices(stats) {
+		parts := strings.SplitN(dev, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		major, majorErr := strconv.ParseUint(parts[0], 10, 64)
+		minor, minorErr := strconv.ParseUint(parts[1], 10, 64)
+		if majorErr != nil || minorErr != nil {
+			continue
+		}
+		name := devNames[dev]
+		if name == "" {
+			name = fmt.Sprintf("dev%s_%s", parts[0], parts[1])
+		}
+
+		read := blkIOOp(stats.serviced, dev, "Read")
+		write := blkIOOp(stats.serviced, dev, "Write")
+		discard := blkIOOp(stats.serviced, dev, "Discard")
+		readMerged := blkIOOp(stats.merged, dev, "Read")
+		writeMerged := blkIOOp(stats.merged, dev, "Write")
+		discardMerged := blkIOOp(stats.merged, dev, "Discard")
+		readSectors := blkIOOp(stats.serviceBytes, dev, "Read") / 512
+		writeSectors := blkIOOp(stats.serviceBytes, dev, "Write") / 512
+		discardSectors := blkIOOp(stats.serviceBytes, dev, "Discard") / 512
+		readTicks := nsToMs(blkIOOp(stats.serviceTime, dev, "Read") + blkIOOp(stats.waitTime, dev, "Read"))
+		writeTicks := nsToMs(blkIOOp(stats.serviceTime, dev, "Write") + blkIOOp(stats.waitTime, dev, "Write"))
+		discardTicks := nsToMs(blkIOOp(stats.serviceTime, dev, "Discard") + blkIOOp(stats.waitTime, dev, "Discard"))
+		totalTicks := nsToMs(blkIOOp(stats.serviceTime, dev, "Total"))
+
+		if read+write+discard+readMerged+writeMerged+discardMerged+readSectors+writeSectors+discardSectors+readTicks+writeTicks+discardTicks+totalTicks == 0 {
+			continue
+		}
+		out.WriteString(fmt.Sprintf("%d       %d %s %d %d %d %d %d %d %d %d 0 %d 0 %d %d %d %d\n",
+			major, minor, name,
+			read, readMerged, readSectors, readTicks,
+			write, writeMerged, writeSectors, writeTicks,
+			totalTicks,
+			discard, discardMerged, discardSectors, discardTicks))
+	}
+	return out.Bytes(), out.Len() > 0
+}
+
+func readBlkIOValues(cg cgroupView, names ...string) map[string]map[string]uint64 {
+	for _, name := range names {
+		if data, ok := cg.readV1("blkio", name); ok && data != "" {
+			return parseBlkIOValues(data)
+		}
+	}
+	return nil
+}
+
+func parseBlkIOValues(data string) map[string]map[string]uint64 {
+	out := map[string]map[string]uint64{}
+	for _, line := range strings.Split(data, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 3 || !strings.Contains(fields[0], ":") {
+			continue
+		}
+		v, err := strconv.ParseUint(fields[2], 10, 64)
+		if err != nil {
+			continue
+		}
+		if out[fields[0]] == nil {
+			out[fields[0]] = map[string]uint64{}
+		}
+		out[fields[0]][fields[1]] = v
+	}
+	return out
+}
+
+func mergeBlkIODevices(stats blkIOStats) map[string]struct{} {
+	devices := map[string]struct{}{}
+	for _, values := range []map[string]map[string]uint64{stats.serviced, stats.merged, stats.serviceBytes, stats.waitTime, stats.serviceTime} {
+		for dev := range values {
+			devices[dev] = struct{}{}
+		}
+	}
+	return devices
+}
+
+func blkIOOp(values map[string]map[string]uint64, dev, op string) uint64 {
+	if values == nil || values[dev] == nil {
+		return 0
+	}
+	return values[dev][op]
+}
+
+func nsToMs(ns uint64) uint64 {
+	return ns / 1_000_000
 }
 
 func diskstatsDeviceNames() map[string]string {
