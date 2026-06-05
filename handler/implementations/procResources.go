@@ -36,11 +36,21 @@ import (
 
 type resourceReader func(*domain.HandlerRequest) ([]byte, error)
 
-const procStatClockTicksPerSecond = 100
+const (
+	procStatClockTicksPerSecond = 100
+	resourceSnapshotTTL         = 200 * time.Millisecond
+)
 
 type readOnlyResource struct {
 	domain.HandlerBase
-	read resourceReader
+	read      resourceReader
+	snapshots map[string]resourceSnapshot
+	mu        sync.Mutex
+}
+
+type resourceSnapshot struct {
+	data      []byte
+	createdAt time.Time
 }
 
 func newReadOnlyResource(name, path string, read resourceReader) *readOnlyResource {
@@ -58,20 +68,23 @@ func newReadOnlyResource(name, path string, read resourceReader) *readOnlyResour
 				},
 			},
 		},
-		read: read,
+		read:      read,
+		snapshots: make(map[string]resourceSnapshot),
 	}
 }
 
 var (
-	ProcCpuinfo_Handler               = newReadOnlyResource("ProcCpuinfo", "/proc/cpuinfo", readCPUInfo)
-	ProcDiskstats_Handler             = newReadOnlyResource("ProcDiskstats", "/proc/diskstats", readDiskstats)
-	ProcMeminfo_Handler               = newReadOnlyResource("ProcMeminfo", "/proc/meminfo", readMemInfo)
-	ProcStat_Handler                  = newReadOnlyResource("ProcStat", "/proc/stat", readProcStat)
-	ProcSlabinfo_Handler              = newReadOnlyResource("ProcSlabinfo", "/proc/slabinfo", readSlabinfo)
-	ProcPressureIO_Handler            = newReadOnlyResource("ProcPressureIO", "/proc/pressure/io", readPressure("io"))
-	ProcPressureCPU_Handler           = newReadOnlyResource("ProcPressureCPU", "/proc/pressure/cpu", readPressure("cpu"))
-	ProcPressureMemory_Handler        = newReadOnlyResource("ProcPressureMemory", "/proc/pressure/memory", readPressure("memory"))
-	SysDevicesSystemCpuOnline_Handler = newReadOnlyResource("SysDevicesSystemCpuOnline", "/sys/devices/system/cpu/online", readCPUOnline)
+	ProcCpuinfo_Handler                = newReadOnlyResource("ProcCpuinfo", "/proc/cpuinfo", readCPUInfo)
+	ProcDiskstats_Handler              = newReadOnlyResource("ProcDiskstats", "/proc/diskstats", readDiskstats)
+	ProcMeminfo_Handler                = newReadOnlyResource("ProcMeminfo", "/proc/meminfo", readMemInfo)
+	ProcStat_Handler                   = newReadOnlyResource("ProcStat", "/proc/stat", readProcStat)
+	ProcSlabinfo_Handler               = newReadOnlyResource("ProcSlabinfo", "/proc/slabinfo", readSlabinfo)
+	ProcLoadavg_Handler                = newReadOnlyResource("ProcLoadavg", "/proc/loadavg", readLoadavg)
+	ProcPressureIO_Handler             = newReadOnlyResource("ProcPressureIO", "/proc/pressure/io", readPressure("io"))
+	ProcPressureCPU_Handler            = newReadOnlyResource("ProcPressureCPU", "/proc/pressure/cpu", readPressure("cpu"))
+	ProcPressureMemory_Handler         = newReadOnlyResource("ProcPressureMemory", "/proc/pressure/memory", readPressure("memory"))
+	SysDevicesSystemCpuOnline_Handler  = newReadOnlyResource("SysDevicesSystemCpuOnline", "/sys/devices/system/cpu/online", readCPUOnline)
+	SysDevicesSystemCpuPresent_Handler = newReadOnlyResource("SysDevicesSystemCpuPresent", "/sys/devices/system/cpu/present", readCPUPresent)
 )
 
 func (h *readOnlyResource) Lookup(n domain.IOnodeIface, req *domain.HandlerRequest) (os.FileInfo, error) {
@@ -103,7 +116,7 @@ func (h *readOnlyResource) Read(n domain.IOnodeIface, req *domain.HandlerRequest
 	logrus.Debugf("Executing Read() for req-id: %#x, handler: %s, resource: %s",
 		req.ID, h.Name, n.Name())
 
-	data, err := h.read(req)
+	data, err := h.snapshotData(req)
 	if err != nil {
 		return 0, err
 	}
@@ -114,6 +127,44 @@ func (h *readOnlyResource) Read(n domain.IOnodeIface, req *domain.HandlerRequest
 
 	copied := copy(req.Data, data[req.Offset:])
 	return copied, nil
+}
+
+func (h *readOnlyResource) snapshotData(req *domain.HandlerRequest) ([]byte, error) {
+	key := h.snapshotKey(req)
+	now := time.Now()
+
+	h.mu.Lock()
+	if snapshot, ok := h.snapshots[key]; ok && (req.Offset > 0 || now.Sub(snapshot.createdAt) < resourceSnapshotTTL) {
+		data := snapshot.data
+		h.mu.Unlock()
+		return data, nil
+	}
+	h.mu.Unlock()
+
+	data, err := h.read(req)
+	if err != nil {
+		return nil, err
+	}
+
+	h.mu.Lock()
+	h.snapshots[key] = resourceSnapshot{
+		data:      data,
+		createdAt: now,
+	}
+	h.mu.Unlock()
+
+	return data, nil
+}
+
+func (h *readOnlyResource) snapshotKey(req *domain.HandlerRequest) string {
+	id := ""
+	if req.Container != nil {
+		id = req.Container.ID()
+	}
+	if id == "" {
+		id = fmt.Sprintf("pid:%d", req.Pid)
+	}
+	return h.Path + ":" + id
 }
 
 func (h *readOnlyResource) Write(n domain.IOnodeIface, req *domain.HandlerRequest) (int, error) {
@@ -178,6 +229,10 @@ func cgroupForReq(req *domain.HandlerRequest) cgroupView {
 		pid = uint32(os.Getpid())
 	}
 
+	return cgroupForPid(pid)
+}
+
+func cgroupForPid(pid uint32) cgroupView {
 	view := cgroupView{v1: make(map[string]string)}
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
 	if err != nil {
@@ -351,32 +406,59 @@ func passThroughProcResource(path string) resourceReader {
 }
 
 func readDiskstats(req *domain.HandlerRequest) ([]byte, error) {
+	cg := cgroupForReq(req)
+	if data, ok := cg.readV2("io.stat"); ok && data != "" {
+		return diskstatsFromIOStat(data), nil
+	}
 	return []byte{}, nil
 }
 
 func readSlabinfo(req *domain.HandlerRequest) ([]byte, error) {
+	cg := cgroupForReq(req)
+	if data, ok := cg.readV1("memory", "memory.kmem.slabinfo"); ok && data != "" {
+		return []byte(ensureTrailingNewline(data)), nil
+	}
 	return []byte("slabinfo - version: 2.1\n# name            <active_objs> <num_objs> <objsize> <objperslab> <pagesperslab> : tunables <limit> <batchcount> <sharedfactor> : slabdata <active_slabs> <num_slabs> <sharedavail>\n"), nil
 }
 
 func readCPUOnline(req *domain.HandlerRequest) ([]byte, error) {
-	cg := cgroupForReq(req)
-	if cpus, ok := cg.readV2("cpuset.cpus.effective"); ok && cpus != "" {
-		return []byte(cpus + "\n"), nil
-	}
-	if cpus, ok := cg.readV2("cpuset.cpus"); ok && cpus != "" {
-		return []byte(cpus + "\n"), nil
-	}
-	if cpus, ok := cg.readV1("cpuset", "cpuset.cpus"); ok && cpus != "" {
-		return []byte(cpus + "\n"), nil
+	count := effectiveCPUCount(req)
+	if count > 0 {
+		return []byte(cpuRangeForCount(count) + "\n"), nil
 	}
 	return hostFile("/sys/devices/system/cpu/online")
+}
+
+func readCPUPresent(req *domain.HandlerRequest) ([]byte, error) {
+	count := effectiveCPUCount(req)
+	if count > 0 {
+		return []byte(cpuRangeForCount(count) + "\n"), nil
+	}
+	return hostFile("/sys/devices/system/cpu/present")
+}
+
+func readRawCPUSet(req *domain.HandlerRequest) (string, bool) {
+	cg := cgroupForReq(req)
+	if cpus, ok := cg.readV2("cpuset.cpus.effective"); ok && cpus != "" {
+		return cpus, true
+	}
+	if cpus, ok := cg.readV2("cpuset.cpus"); ok && cpus != "" {
+		return cpus, true
+	}
+	if cpus, ok := cg.readV1("cpuset", "cpuset.cpus"); ok && cpus != "" {
+		return cpus, true
+	}
+	if data, err := hostFile("/sys/devices/system/cpu/online"); err == nil {
+		return strings.TrimSpace(string(data)), true
+	}
+	return "", false
 }
 
 func effectiveCPUCount(req *domain.HandlerRequest) int {
 	cg := cgroupForReq(req)
 	limit := 0
-	if online, err := readCPUOnline(req); err == nil {
-		limit = countCPURange(strings.TrimSpace(string(online)))
+	if online, ok := readRawCPUSet(req); ok {
+		limit = countCPURange(online)
 	}
 
 	if max, ok := cg.readV2("cpu.max"); ok {
@@ -415,6 +497,13 @@ func effectiveCPUCount(req *domain.HandlerRequest) int {
 		return hostCPUCount()
 	}
 	return limit
+}
+
+func cpuRangeForCount(count int) string {
+	if count <= 1 {
+		return "0"
+	}
+	return fmt.Sprintf("0-%d", count-1)
 }
 
 func countCPURange(s string) int {
@@ -656,6 +745,11 @@ func readMemInfo(req *domain.HandlerRequest) ([]byte, error) {
 	writeMemLine(&out, "Slab", minHost(host, "Slab", usedKB))
 	writeMemLine(&out, "SReclaimable", minHost(host, "SReclaimable", usedKB))
 	writeMemLine(&out, "SUnreclaim", minHost(host, "SUnreclaim", usedKB))
+	writeMemLine(&out, "KernelStack", minHost(host, "KernelStack", usedKB))
+	writeMemLine(&out, "PageTables", minHost(host, "PageTables", usedKB))
+	writeMemLine(&out, "NFS_Unstable", 0)
+	writeMemLine(&out, "Bounce", 0)
+	writeMemLine(&out, "WritebackTmp", 0)
 	return out.Bytes(), nil
 }
 
@@ -776,8 +870,231 @@ func readPressure(name string) resourceReader {
 	return func(req *domain.HandlerRequest) ([]byte, error) {
 		cg := cgroupForReq(req)
 		if data, ok := cg.readV2(filepath.Join(name + ".pressure")); ok {
-			return []byte(data + "\n"), nil
+			return []byte(ensureTrailingNewline(data)), nil
 		}
 		return hostFile(filepath.Join("/proc/pressure", name))
 	}
+}
+
+func readLoadavg(req *domain.HandlerRequest) ([]byte, error) {
+	total, lastPID := visibleProcessStats(req)
+	if total == 0 {
+		total = 1
+	}
+	return []byte(fmt.Sprintf("0.00 0.00 0.00 1/%d %d\n", total, lastPID)), nil
+}
+
+func visibleProcessStats(req *domain.HandlerRequest) (int, int) {
+	if req.Container != nil && req.Container.InitPid() != 0 {
+		count := descendantProcessCount(int(req.Container.InitPid()))
+		if count > 0 {
+			return count, count
+		}
+	}
+
+	target := cgroupForReq(req)
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0, 0
+	}
+	count := 0
+	lastPID := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		if !sameOrChildCgroupView(target, cgroupForPid(uint32(pid))) {
+			continue
+		}
+		count++
+		nsPID := namespacePID(pid)
+		if nsPID > lastPID {
+			lastPID = nsPID
+		}
+	}
+	return count, lastPID
+}
+
+func descendantProcessCount(initPID int) int {
+	parents := processParentMap()
+	if len(parents) == 0 {
+		return 0
+	}
+
+	count := 0
+	for pid := range parents {
+		if pid == initPID || isDescendantPID(pid, initPID, parents) {
+			count++
+		}
+	}
+	return count
+}
+
+func processParentMap() map[int]int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	parents := map[int]int{}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		ppid, ok := processParentPID(pid)
+		if ok {
+			parents[pid] = ppid
+		}
+	}
+	return parents
+}
+
+func processParentPID(pid int) (int, bool) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0, false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "PPid:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0, false
+		}
+		ppid, err := strconv.Atoi(fields[1])
+		return ppid, err == nil
+	}
+	return 0, false
+}
+
+func isDescendantPID(pid, ancestor int, parents map[int]int) bool {
+	seen := map[int]struct{}{}
+	for pid > 1 {
+		if pid == ancestor {
+			return true
+		}
+		if _, ok := seen[pid]; ok {
+			return false
+		}
+		seen[pid] = struct{}{}
+		parent, ok := parents[pid]
+		if !ok {
+			return false
+		}
+		pid = parent
+	}
+	return false
+}
+
+func sameOrChildCgroupView(a, b cgroupView) bool {
+	if a.v2Path != "" && b.v2Path != "" {
+		return sameOrChildPath(a.v2Path, b.v2Path) || sameOrChildPath(b.v2Path, a.v2Path)
+	}
+	for ctrl, aPath := range a.v1 {
+		if bPath, ok := b.v1[ctrl]; ok && (sameOrChildPath(aPath, bPath) || sameOrChildPath(bPath, aPath)) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameOrChildPath(parent, child string) bool {
+	parent = filepath.Clean(parent)
+	child = filepath.Clean(child)
+	return child == parent || strings.HasPrefix(child, strings.TrimRight(parent, "/")+"/")
+}
+
+func namespacePID(hostPID int) int {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", hostPID))
+	if err != nil {
+		return hostPID
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "NSpid:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			return hostPID
+		}
+		pid, err := strconv.Atoi(fields[len(fields)-1])
+		if err == nil {
+			return pid
+		}
+	}
+	return hostPID
+}
+
+func diskstatsFromIOStat(data string) []byte {
+	devNames := diskstatsDeviceNames()
+	out := bytes.Buffer{}
+	for _, line := range strings.Split(strings.TrimSpace(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || !strings.Contains(fields[0], ":") {
+			continue
+		}
+		dev := fields[0]
+		parts := strings.SplitN(dev, ":", 2)
+		major, majorErr := strconv.ParseUint(parts[0], 10, 64)
+		minor, minorErr := strconv.ParseUint(parts[1], 10, 64)
+		if majorErr != nil || minorErr != nil {
+			continue
+		}
+
+		values := map[string]uint64{}
+		for _, field := range fields[1:] {
+			kv := strings.SplitN(field, "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			v, err := strconv.ParseUint(kv[1], 10, 64)
+			if err == nil {
+				values[kv[0]] = v
+			}
+		}
+
+		name := devNames[dev]
+		if name == "" {
+			name = fmt.Sprintf("dev%s_%s", parts[0], parts[1])
+		}
+		readSectors := values["rbytes"] / 512
+		writeSectors := values["wbytes"] / 512
+		discardSectors := values["dbytes"] / 512
+		out.WriteString(fmt.Sprintf("%4d %7d %-8s %d 0 %d 0 %d 0 %d 0 0 0 0 %d 0 %d 0\n",
+			major, minor, name,
+			values["rios"], readSectors,
+			values["wios"], writeSectors,
+			values["dios"], discardSectors))
+	}
+	return out.Bytes()
+}
+
+func diskstatsDeviceNames() map[string]string {
+	data, err := os.ReadFile("/proc/diskstats")
+	if err != nil {
+		return nil
+	}
+	names := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 {
+			names[fields[0]+":"+fields[1]] = fields[2]
+		}
+	}
+	return names
+}
+
+func ensureTrailingNewline(data string) string {
+	if strings.HasSuffix(data, "\n") {
+		return data
+	}
+	return data + "\n"
 }

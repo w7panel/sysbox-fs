@@ -17,6 +17,7 @@
 package implementations
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -184,15 +185,22 @@ func (h *ProcSwaps) readSwaps(
 
 	logrus.Debugf("Executing %v Read() method", h.Name)
 
-	if req.Offset > 0 {
+	data := procSwapsData(req)
+	if req.Offset >= int64(len(data)) {
 		return 0, io.EOF
 	}
 
-	// Pretend swapping is off
-	//
-	// TODO: fix this once Sysbox intercepts the swapon() and swapoff() syscalls.
+	copied := copy(req.Data, data[req.Offset:])
+	return copied, nil
+}
 
-	req.Data = []byte(swapsHeader + "\n")
+func procSwapsData(req *domain.HandlerRequest) []byte {
+	out := swapsHeader + "\n"
+	total, used := swapValues(cgroupForReq(req))
+	if total == 0 {
+		return []byte(out)
+	}
 
-	return len(req.Data), nil
+	out += fmt.Sprintf("none                                virtual         %d\t%d\t0\n", total/1024, used/1024)
+	return []byte(out)
 }

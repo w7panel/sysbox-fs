@@ -127,3 +127,39 @@ func TestWriteProcStatCPULine(t *testing.T) {
 		t.Fatalf("writeProcStatCPULine() = %q, want %q", got, want)
 	}
 }
+
+func TestCPURangeForCount(t *testing.T) {
+	cases := []struct {
+		count int
+		want  string
+	}{
+		{0, "0"},
+		{1, "0"},
+		{4, "0-3"},
+	}
+
+	for _, tc := range cases {
+		if got := cpuRangeForCount(tc.count); got != tc.want {
+			t.Fatalf("cpuRangeForCount(%d) = %q, want %q", tc.count, got, tc.want)
+		}
+	}
+}
+
+func TestDiskstatsFromIOStat(t *testing.T) {
+	got := string(diskstatsFromIOStat("8:0 rbytes=1024 wbytes=2048 rios=3 wios=4 dbytes=512 dios=1\n"))
+
+	if !bytes.Contains([]byte(got), []byte("8")) ||
+		!bytes.Contains([]byte(got), []byte("3 0 2 0")) ||
+		!bytes.Contains([]byte(got), []byte("4 0 4 0")) {
+		t.Fatalf("diskstatsFromIOStat() = %q, want converted io counters", got)
+	}
+}
+
+func TestEnsureTrailingNewline(t *testing.T) {
+	if got := ensureTrailingNewline("some avg10=0.00"); got != "some avg10=0.00\n" {
+		t.Fatalf("ensureTrailingNewline() = %q", got)
+	}
+	if got := ensureTrailingNewline("x\n"); got != "x\n" {
+		t.Fatalf("ensureTrailingNewline() changed newline-terminated data: %q", got)
+	}
+}

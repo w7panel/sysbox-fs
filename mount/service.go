@@ -42,6 +42,7 @@ var ProcfsMounts = []string{
 	"/proc/meminfo",
 	"/proc/stat",
 	"/proc/slabinfo",
+	"/proc/loadavg",
 	"/proc/pressure/io",
 	"/proc/pressure/cpu",
 	"/proc/pressure/memory",
@@ -52,6 +53,7 @@ var ProcfsMounts = []string{
 
 var SysfsMounts = []string{
 	"/sys/devices/system/cpu/online",
+	"/sys/devices/system/cpu/present",
 	"/sys/kernel",
 	"/sys/devices/virtual",
 	"/sys/module/nf_conntrack/parameters",

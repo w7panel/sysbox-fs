@@ -46,6 +46,7 @@ var DefaultHandlers = []domain.HandlerIface{
 	implementations.ProcMeminfo_Handler,                    // /proc/meminfo
 	implementations.ProcStat_Handler,                       // /proc/stat
 	implementations.ProcSlabinfo_Handler,                   // /proc/slabinfo
+	implementations.ProcLoadavg_Handler,                    // /proc/loadavg
 	implementations.ProcPressure_Handler,                   // /proc/pressure
 	implementations.ProcPressureIO_Handler,                 // /proc/pressure/io
 	implementations.ProcPressureCPU_Handler,                // /proc/pressure/cpu
@@ -69,6 +70,7 @@ var DefaultHandlers = []domain.HandlerIface{
 	implementations.SysDevicesVirtualDmi_Handler,           // /sys/devices/virtual/dmi
 	implementations.SysDevicesVirtualDmiId_Handler,         // /sys/devices/virtual/dmi/id
 	implementations.SysDevicesSystemCpuOnline_Handler,      // /sys/devices/system/cpu/online
+	implementations.SysDevicesSystemCpuPresent_Handler,     // /sys/devices/system/cpu/present
 	implementations.SysModuleNfconntrackParameters_Handler, // /sys/module/nf_conntrack/parameters
 }
 
