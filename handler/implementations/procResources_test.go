@@ -119,6 +119,56 @@ func TestSplitProcStatCPUTicksPreservesTotals(t *testing.T) {
 	}
 }
 
+func TestSplitProcStatDeltaPreservesTotals(t *testing.T) {
+	parts := splitProcStatDelta(procStatDelta{user: 11, system: 7, idle: 13}, []uint64{3, 1})
+
+	sum := procStatDelta{}
+	for _, part := range parts {
+		sum.user += part.user
+		sum.system += part.system
+		sum.idle += part.idle
+	}
+
+	if sum.user != 11 || sum.system != 7 || sum.idle != 13 {
+		t.Fatalf("splitProcStatDelta() totals = %+v, want user=11 system=7 idle=13", sum)
+	}
+}
+
+func TestProcStatUsageDeltaClampsToElapsedCapacity(t *testing.T) {
+	delta := procStatUsageDelta(
+		containerCPUUsage{UsageSeconds: 20, UserSeconds: 15, SystemSeconds: 5},
+		containerCPUUsage{},
+		1,
+		2,
+	)
+
+	if got := delta.user + delta.system + delta.idle; got != 200 {
+		t.Fatalf("total delta ticks = %d, want 200", got)
+	}
+	if delta.idle != 0 {
+		t.Fatalf("idle delta ticks = %d, want 0", delta.idle)
+	}
+}
+
+func TestParseProcStatHostCPUs(t *testing.T) {
+	fieldCount, cpus := parseProcStatHostCPUs([]string{
+		"cpu  10 0 5 20 1 2 3 0 0 0",
+		"cpu0 4 0 2 10 0 0 0 0 0 0",
+		"cpu1 6 0 3 10 1 2 3 0 0 0",
+		"intr 1",
+	})
+
+	if fieldCount != 10 {
+		t.Fatalf("fieldCount = %d, want 10", fieldCount)
+	}
+	if len(cpus) != 2 {
+		t.Fatalf("cpus len = %d, want 2", len(cpus))
+	}
+	if got := procStatBusyDelta(cpus[1], cpus[0]); got != 9 {
+		t.Fatalf("procStatBusyDelta() = %d, want 9", got)
+	}
+}
+
 func TestWriteProcStatCPULine(t *testing.T) {
 	out := bytes.Buffer{}
 	writeProcStatCPULine(&out, "cpu0", []uint64{1, 2, 3, 4})

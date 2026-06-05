@@ -23,6 +23,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,6 +40,7 @@ type resourceReader func(*domain.HandlerRequest) ([]byte, error)
 const (
 	procStatClockTicksPerSecond = 100
 	resourceSnapshotTTL         = 200 * time.Millisecond
+	procStatStateStaleAfter     = 5 * time.Minute
 	loadavgSampleInterval       = 5 * time.Second
 	loadavgStaleAfter           = 5 * time.Minute
 	loadavgFShift               = uint64(11)
@@ -59,6 +61,27 @@ type resourceSnapshot struct {
 	data      []byte
 	createdAt time.Time
 }
+
+type procStatState struct {
+	mu          sync.Mutex
+	initialized bool
+	lastSeen    time.Time
+	lastAt      time.Time
+	lastRaw     containerCPUUsage
+	lastHost    [][]uint64
+	view        [][]uint64
+}
+
+type procStatDelta struct {
+	user   uint64
+	system uint64
+	idle   uint64
+}
+
+var (
+	procStatStatesMu sync.Mutex
+	procStatStates   = make(map[string]*procStatState)
+)
 
 func newReadOnlyResource(name, path string, read resourceReader) *readOnlyResource {
 	return &readOnlyResource{
@@ -323,6 +346,7 @@ type containerCPUUsage struct {
 	UsageSeconds  float64
 	UserSeconds   float64
 	SystemSeconds float64
+	PerCPUSeconds []float64
 }
 
 func cpuUsageFromCgroup(cg cgroupView) containerCPUUsage {
@@ -394,6 +418,17 @@ func cpuUsageFromCgroupV1(cg cgroupView) (containerCPUUsage, bool) {
 			usage.UsageSeconds = float64(usageNs) / 1_000_000_000
 			ok = true
 		}
+	}
+
+	if perCPU, perCPUOk := cg.readV1("cpuacct", "cpuacct.usage_percpu"); perCPUOk {
+		for _, field := range strings.Fields(perCPU) {
+			usageNs, err := strconv.ParseUint(field, 10, 64)
+			if err != nil {
+				continue
+			}
+			usage.PerCPUSeconds = append(usage.PerCPUSeconds, float64(usageNs)/1_000_000_000)
+		}
+		ok = true
 	}
 
 	if usage.UsageSeconds == 0 {
@@ -593,22 +628,13 @@ func readProcStat(req *domain.HandlerRequest) ([]byte, error) {
 	}
 
 	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	fieldCount := 10
-	for _, line := range lines {
-		if strings.HasPrefix(line, "cpu ") {
-			fields := strings.Fields(line)
-			if len(fields) > 1 {
-				fieldCount = len(fields) - 1
-			}
-			break
-		}
-	}
+	fieldCount, hostCPUs := parseProcStatHostCPUs(lines)
 
 	out := bytes.Buffer{}
-	totals := procStatCPUTicks(req, limit, fieldCount, time.Now())
+	totals, cpus := procStatCPUView(req, limit, fieldCount, time.Now(), hostCPUs)
 	writeProcStatCPULine(&out, "cpu", totals)
-	for i := 0; i < limit; i++ {
-		writeProcStatCPULine(&out, fmt.Sprintf("cpu%d", i), splitProcStatCPUTicks(totals, limit, i))
+	for i, cpu := range cpus {
+		writeProcStatCPULine(&out, fmt.Sprintf("cpu%d", i), cpu)
 	}
 
 	for _, line := range lines {
@@ -632,6 +658,378 @@ func procStatCPUTicks(req *domain.HandlerRequest, cpus int, fieldCount int, now 
 	}
 
 	return procStatCPUTicksFromUsage(uptime, cpus, fieldCount, cpuUsageFromCgroup(cgroupForReq(req)))
+}
+
+func procStatCPUView(req *domain.HandlerRequest, cpus int, fieldCount int, now time.Time, hostCPUs [][]uint64) ([]uint64, [][]uint64) {
+	if fieldCount < 4 {
+		fieldCount = 4
+	}
+	if cpus <= 0 {
+		cpus = 1
+	}
+
+	cg := cgroupForProcStatReq(req)
+	key := procStatStateKey(req, cg)
+	state := procStatStateForKey(key, now)
+	raw := cpuUsageFromCgroup(cg)
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.lastSeen = now
+
+	if !state.initialized || procStatUsageReset(raw, state.lastRaw) || len(state.view) != cpus || procStatFieldCount(state.view) != fieldCount {
+		state.view = procStatInitialCPUView(req, cpus, fieldCount, raw, now)
+		state.lastRaw = raw
+		state.lastHost = cloneProcStatCPUValues(hostCPUs)
+		state.lastAt = now
+		state.initialized = true
+		return sumProcStatCPUs(state.view, fieldCount), cloneProcStatCPUValues(state.view)
+	}
+
+	elapsed := now.Sub(state.lastAt).Seconds()
+	if elapsed < 0 {
+		elapsed = 0
+	}
+
+	delta := procStatUsageDelta(raw, state.lastRaw, elapsed, cpus)
+	weights := procStatCPUWeights(cpus, raw, state.lastRaw, hostCPUs, state.lastHost)
+	parts := splitProcStatDelta(delta, weights)
+	for i := range state.view {
+		procStatAddDelta(state.view[i], parts[i])
+	}
+
+	state.lastRaw = raw
+	state.lastHost = cloneProcStatCPUValues(hostCPUs)
+	state.lastAt = now
+
+	return sumProcStatCPUs(state.view, fieldCount), cloneProcStatCPUValues(state.view)
+}
+
+func cgroupForProcStatReq(req *domain.HandlerRequest) cgroupView {
+	if req.Pid != 0 {
+		cg := cgroupForPid(req.Pid)
+		if cg.v2Path != "" || len(cg.v1) > 0 {
+			return cg
+		}
+	}
+	return cgroupForReq(req)
+}
+
+func procStatStateKey(req *domain.HandlerRequest, cg cgroupView) string {
+	if cg.v2Path != "" {
+		return "v2:" + cg.v2Path
+	}
+
+	parts := make([]string, 0, len(cg.v1))
+	for ctrl, path := range cg.v1 {
+		if ctrl == "cpuacct" || ctrl == "cpu" || ctrl == "cpuset" {
+			parts = append(parts, ctrl+":"+path)
+		}
+	}
+	if len(parts) > 0 {
+		sort.Strings(parts)
+		return "v1:" + strings.Join(parts, "|")
+	}
+
+	if req.Container != nil && req.Container.ID() != "" {
+		return "container:" + req.Container.ID()
+	}
+	return fmt.Sprintf("pid:%d", req.Pid)
+}
+
+func procStatStateForKey(key string, now time.Time) *procStatState {
+	procStatStatesMu.Lock()
+	defer procStatStatesMu.Unlock()
+
+	for k, state := range procStatStates {
+		state.mu.Lock()
+		stale := !state.lastSeen.IsZero() && now.Sub(state.lastSeen) > procStatStateStaleAfter
+		state.mu.Unlock()
+		if stale {
+			delete(procStatStates, k)
+		}
+	}
+
+	state, ok := procStatStates[key]
+	if !ok {
+		state = &procStatState{}
+		procStatStates[key] = state
+	}
+	return state
+}
+
+func procStatInitialCPUView(req *domain.HandlerRequest, cpus int, fieldCount int, raw containerCPUUsage, now time.Time) [][]uint64 {
+	uptime := 0.0
+	if req.Container != nil {
+		uptime = containerUptime(req.Container.Ctime(), now)
+	}
+	total := procStatCPUTicksFromUsage(uptime, cpus, fieldCount, raw)
+	view := make([][]uint64, cpus)
+	for i := 0; i < cpus; i++ {
+		view[i] = splitProcStatCPUTicks(total, cpus, i)
+	}
+	return view
+}
+
+func procStatUsageReset(cur, prev containerCPUUsage) bool {
+	return cur.UsageSeconds < prev.UsageSeconds ||
+		cur.UserSeconds < prev.UserSeconds ||
+		cur.SystemSeconds < prev.SystemSeconds ||
+		procStatPerCPUReset(cur.PerCPUSeconds, prev.PerCPUSeconds)
+}
+
+func procStatPerCPUReset(cur, prev []float64) bool {
+	limit := len(cur)
+	if len(prev) < limit {
+		limit = len(prev)
+	}
+	for i := 0; i < limit; i++ {
+		if cur[i] < prev[i] {
+			return true
+		}
+	}
+	return false
+}
+
+func procStatUsageDelta(cur, prev containerCPUUsage, elapsed float64, cpus int) procStatDelta {
+	used := cur.UsageSeconds - prev.UsageSeconds
+	if used < 0 {
+		used = 0
+	}
+	user := cur.UserSeconds - prev.UserSeconds
+	system := cur.SystemSeconds - prev.SystemSeconds
+	if user < 0 {
+		user = 0
+	}
+	if system < 0 {
+		system = 0
+	}
+	if user+system == 0 && used > 0 {
+		user = used
+	}
+	if used == 0 && user+system > 0 {
+		used = user + system
+	}
+	if user+system > used && user+system > 0 {
+		scale := used / (user + system)
+		user *= scale
+		system *= scale
+	}
+
+	capacity := elapsed * float64(cpus)
+	if capacity < 0 {
+		capacity = 0
+	}
+	if used > capacity {
+		scale := 0.0
+		if used > 0 {
+			scale = capacity / used
+		}
+		used = capacity
+		user *= scale
+		system *= scale
+	}
+	idle := capacity - used
+	if idle < 0 {
+		idle = 0
+	}
+
+	return procStatDelta{
+		user:   secondsToProcStatTicks(user),
+		system: secondsToProcStatTicks(system),
+		idle:   secondsToProcStatTicks(idle),
+	}
+}
+
+func procStatCPUWeights(cpus int, cur, prev containerCPUUsage, hostCur, hostPrev [][]uint64) []uint64 {
+	if weights := procStatPerCPUUsageWeights(cpus, cur.PerCPUSeconds, prev.PerCPUSeconds); len(weights) == cpus {
+		return weights
+	}
+	if weights := procStatHostCPUWeights(cpus, hostCur, hostPrev); len(weights) == cpus {
+		return weights
+	}
+	weights := make([]uint64, cpus)
+	for i := range weights {
+		weights[i] = 1
+	}
+	return weights
+}
+
+func procStatPerCPUUsageWeights(cpus int, cur, prev []float64) []uint64 {
+	if len(cur) == 0 || len(prev) == 0 {
+		return nil
+	}
+	weights := make([]uint64, cpus)
+	limit := cpus
+	if len(cur) < limit {
+		limit = len(cur)
+	}
+	if len(prev) < limit {
+		limit = len(prev)
+	}
+	total := uint64(0)
+	for i := 0; i < limit; i++ {
+		if cur[i] <= prev[i] {
+			continue
+		}
+		weight := secondsToProcStatTicks(cur[i] - prev[i])
+		weights[i] = weight
+		total += weight
+	}
+	if total == 0 {
+		return nil
+	}
+	return weights
+}
+
+func procStatHostCPUWeights(cpus int, cur, prev [][]uint64) []uint64 {
+	if len(cur) == 0 || len(prev) == 0 {
+		return nil
+	}
+	weights := make([]uint64, cpus)
+	total := uint64(0)
+	for i := 0; i < cpus && i < len(cur) && i < len(prev); i++ {
+		weight := procStatBusyDelta(cur[i], prev[i])
+		weights[i] = weight
+		total += weight
+	}
+	if total == 0 {
+		return nil
+	}
+	return weights
+}
+
+func procStatBusyDelta(cur, prev []uint64) uint64 {
+	limit := len(cur)
+	if len(prev) < limit {
+		limit = len(prev)
+	}
+	delta := uint64(0)
+	for i := 0; i < limit; i++ {
+		if i == 3 {
+			continue
+		}
+		if cur[i] > prev[i] {
+			delta += cur[i] - prev[i]
+		}
+	}
+	return delta
+}
+
+func splitProcStatDelta(delta procStatDelta, weights []uint64) []procStatDelta {
+	parts := make([]procStatDelta, len(weights))
+	splitProcStatValue(delta.user, weights, func(i int, v uint64) { parts[i].user += v })
+	splitProcStatValue(delta.system, weights, func(i int, v uint64) { parts[i].system += v })
+	splitProcStatValue(delta.idle, weights, func(i int, v uint64) { parts[i].idle += v })
+	return parts
+}
+
+func splitProcStatValue(value uint64, weights []uint64, set func(int, uint64)) {
+	if len(weights) == 0 {
+		return
+	}
+	totalWeight := uint64(0)
+	for _, weight := range weights {
+		totalWeight += weight
+	}
+	if totalWeight == 0 {
+		for i := range weights {
+			weights[i] = 1
+		}
+		totalWeight = uint64(len(weights))
+	}
+
+	assigned := uint64(0)
+	maxIndex := 0
+	for i, weight := range weights {
+		if weight > weights[maxIndex] {
+			maxIndex = i
+		}
+		part := value * weight / totalWeight
+		set(i, part)
+		assigned += part
+	}
+	if assigned < value {
+		set(maxIndex, value-assigned)
+	}
+}
+
+func procStatAddDelta(cpu []uint64, delta procStatDelta) {
+	if len(cpu) > 0 {
+		cpu[0] += delta.user
+	}
+	if len(cpu) > 2 {
+		cpu[2] += delta.system
+	}
+	if len(cpu) > 3 {
+		cpu[3] += delta.idle
+	}
+}
+
+func procStatFieldCount(cpus [][]uint64) int {
+	if len(cpus) == 0 {
+		return 0
+	}
+	return len(cpus[0])
+}
+
+func parseProcStatHostCPUs(lines []string) (int, [][]uint64) {
+	fieldCount := 10
+	cpus := [][]uint64{}
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if fields[0] == "cpu" {
+			if len(fields) > 1 {
+				fieldCount = len(fields) - 1
+			}
+			continue
+		}
+		if !strings.HasPrefix(fields[0], "cpu") {
+			if len(cpus) > 0 {
+				break
+			}
+			continue
+		}
+		if _, err := strconv.Atoi(strings.TrimPrefix(fields[0], "cpu")); err != nil {
+			continue
+		}
+		values := make([]uint64, fieldCount)
+		for i := 1; i < len(fields) && i <= fieldCount; i++ {
+			v, err := strconv.ParseUint(fields[i], 10, 64)
+			if err == nil {
+				values[i-1] = v
+			}
+		}
+		cpus = append(cpus, values)
+	}
+	if fieldCount < 4 {
+		fieldCount = 4
+	}
+	return fieldCount, cpus
+}
+
+func sumProcStatCPUs(cpus [][]uint64, fieldCount int) []uint64 {
+	if fieldCount < 4 {
+		fieldCount = 4
+	}
+	total := make([]uint64, fieldCount)
+	for _, cpu := range cpus {
+		for i := 0; i < len(cpu) && i < fieldCount; i++ {
+			total[i] += cpu[i]
+		}
+	}
+	return total
+}
+
+func cloneProcStatCPUValues(cpus [][]uint64) [][]uint64 {
+	out := make([][]uint64, len(cpus))
+	for i, cpu := range cpus {
+		out[i] = append([]uint64(nil), cpu...)
+	}
+	return out
 }
 
 func procStatCPUTicksFromUsage(uptime float64, cpus int, fieldCount int, usage containerCPUUsage) []uint64 {
