@@ -17,8 +17,12 @@
 package implementations
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/nestybox/sysbox-fs/domain"
+	"github.com/nestybox/sysbox-fs/state"
 )
 
 func TestContainerUptime(t *testing.T) {
@@ -57,44 +61,60 @@ func TestContainerIdleFromCgroupZeroUptime(t *testing.T) {
 }
 
 func TestContainerIdleArithmetic(t *testing.T) {
-	// Simulate what containerIdleFromCgroup does with usage_usec:
-	// uptime=100, usage_usec=500000 => cpuSeconds=0.5 => idle=99.5
-	usageUsec := uint64(500000)
-	cpuSeconds := float64(usageUsec) / 1_000_000
-	uptime := 100.0
-	got := uptime - cpuSeconds
-	if got < 0 {
-		got = 0
-	}
+	got := containerIdleFromUsage(100, 1, 0.5)
 	if got != 99.5 {
-		t.Fatalf("idle calculation: got %v, want 99.5", got)
+		t.Fatalf("containerIdleFromUsage() = %v, want 99.5", got)
+	}
+}
+
+func TestContainerIdleUsesCPUCapacity(t *testing.T) {
+	got := containerIdleFromUsage(100, 4, 20)
+	if got != 380 {
+		t.Fatalf("containerIdleFromUsage() = %v, want 380", got)
 	}
 }
 
 func TestContainerIdleClamp(t *testing.T) {
-	// When cpuSeconds > uptime, idle should clamp to 0.
-	usageUsec := uint64(200_000_000) // 200s
-	cpuSeconds := float64(usageUsec) / 1_000_000
-	uptime := 100.0
-	got := uptime - cpuSeconds
-	if got < 0 {
-		got = 0
-	}
+	got := containerIdleFromUsage(100, 1, 200)
 	if got != 0 {
-		t.Fatalf("idle clamp: got %v, want 0", got)
+		t.Fatalf("containerIdleFromUsage() = %v, want 0", got)
 	}
 }
 
 func TestContainerIdleCgroupV1Arithmetic(t *testing.T) {
-	// cpuacct.usage is in nanoseconds: 500_000_000 ns = 0.5s
-	usageNs := uint64(500_000_000)
-	cpuSeconds := float64(usageNs) / 1_000_000_000
-	uptime := 100.0
-	got := uptime - cpuSeconds
-	if got < 0 {
-		got = 0
-	}
+	got := containerIdleFromUsage(100, 1, 0.5)
 	if got != 99.5 {
-		t.Fatalf("cgroupv1 idle calculation: got %v, want 99.5", got)
+		t.Fatalf("containerIdleFromUsage() = %v, want 99.5", got)
+	}
+}
+
+func TestProcUptimeNonZeroOffset(t *testing.T) {
+	cntr := state.NewContainerStateService().ContainerCreate(
+		"c1",
+		0,
+		time.Now().Add(-100*time.Second),
+		231072,
+		65535,
+		231072,
+		65535,
+		nil,
+		nil,
+		nil)
+
+	req := &domain.HandlerRequest{
+		Offset:    1,
+		Data:      make([]byte, 8),
+		Container: cntr,
+	}
+
+	n, err := ProcUptime_Handler.readUptime(nil, req)
+	if err != nil {
+		t.Fatalf("readUptime() error = %v, want nil", err)
+	}
+	if n == 0 {
+		t.Fatal("readUptime() returned 0 bytes at non-zero offset")
+	}
+	if strings.Contains(string(req.Data[:n]), "\x00") {
+		t.Fatalf("readUptime() returned null bytes: %q", string(req.Data[:n]))
 	}
 }

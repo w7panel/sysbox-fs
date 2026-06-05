@@ -36,6 +36,8 @@ import (
 
 type resourceReader func(*domain.HandlerRequest) ([]byte, error)
 
+const procStatClockTicksPerSecond = 100
+
 type readOnlyResource struct {
 	domain.HandlerBase
 	read resourceReader
@@ -255,6 +257,89 @@ func parseUintValue(s string) (uint64, bool) {
 	return v, err == nil
 }
 
+type containerCPUUsage struct {
+	UsageSeconds  float64
+	UserSeconds   float64
+	SystemSeconds float64
+}
+
+func cpuUsageFromCgroup(cg cgroupView) containerCPUUsage {
+	if usage, ok := cpuUsageFromCgroupV2(cg); ok {
+		return usage
+	}
+	if usage, ok := cpuUsageFromCgroupV1(cg); ok {
+		return usage
+	}
+	return containerCPUUsage{}
+}
+
+func cpuUsageFromCgroupV2(cg cgroupView) (containerCPUUsage, bool) {
+	data, ok := cg.readV2("cpu.stat")
+	if !ok {
+		return containerCPUUsage{}, false
+	}
+
+	values := map[string]uint64{}
+	for _, line := range strings.Split(data, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		v, err := strconv.ParseUint(fields[1], 10, 64)
+		if err == nil {
+			values[fields[0]] = v
+		}
+	}
+
+	usageUsec, ok := values["usage_usec"]
+	if !ok {
+		return containerCPUUsage{}, false
+	}
+
+	return containerCPUUsage{
+		UsageSeconds:  float64(usageUsec) / 1_000_000,
+		UserSeconds:   float64(values["user_usec"]) / 1_000_000,
+		SystemSeconds: float64(values["system_usec"]) / 1_000_000,
+	}, true
+}
+
+func cpuUsageFromCgroupV1(cg cgroupView) (containerCPUUsage, bool) {
+	usage := containerCPUUsage{}
+	ok := false
+
+	if stat, statOk := cg.readV1("cpuacct", "cpuacct.stat"); statOk {
+		for _, line := range strings.Split(stat, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) != 2 {
+				continue
+			}
+			v, err := strconv.ParseUint(fields[1], 10, 64)
+			if err != nil {
+				continue
+			}
+			switch fields[0] {
+			case "user":
+				usage.UserSeconds = float64(v) / procStatClockTicksPerSecond
+			case "system":
+				usage.SystemSeconds = float64(v) / procStatClockTicksPerSecond
+			}
+		}
+		ok = true
+	}
+
+	if total, totalOk := cg.readV1("cpuacct", "cpuacct.usage"); totalOk {
+		if usageNs, parsed := parseUintValue(total); parsed {
+			usage.UsageSeconds = float64(usageNs) / 1_000_000_000
+			ok = true
+		}
+	}
+
+	if usage.UsageSeconds == 0 {
+		usage.UsageSeconds = usage.UserSeconds + usage.SystemSeconds
+	}
+	return usage, ok
+}
+
 func hostFile(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
@@ -409,49 +494,112 @@ func readProcStat(req *domain.HandlerRequest) ([]byte, error) {
 	}
 
 	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	var cpuLines [][]uint64
+	fieldCount := 10
 	for _, line := range lines {
-		if strings.HasPrefix(line, "cpu") && len(line) > 3 && line[3] >= '0' && line[3] <= '9' {
+		if strings.HasPrefix(line, "cpu ") {
 			fields := strings.Fields(line)
-			var vals []uint64
-			for _, f := range fields[1:] {
-				v, _ := strconv.ParseUint(f, 10, 64)
-				vals = append(vals, v)
+			if len(fields) > 1 {
+				fieldCount = len(fields) - 1
 			}
-			cpuLines = append(cpuLines, vals)
+			break
 		}
-	}
-	if limit >= len(cpuLines) {
-		return data, nil
 	}
 
 	out := bytes.Buffer{}
-	totals := make([]uint64, len(cpuLines[0]))
+	totals := procStatCPUTicks(req, limit, fieldCount, time.Now())
+	writeProcStatCPULine(&out, "cpu", totals)
 	for i := 0; i < limit; i++ {
-		for j, v := range cpuLines[i] {
-			totals[j] += v
-		}
+		writeProcStatCPULine(&out, fmt.Sprintf("cpu%d", i), splitProcStatCPUTicks(totals, limit, i))
 	}
-	out.WriteString("cpu")
-	for _, v := range totals {
-		out.WriteString(fmt.Sprintf(" %d", v))
-	}
-	out.WriteByte('\n')
-	for i := 0; i < limit; i++ {
-		out.WriteString(fmt.Sprintf("cpu%d", i))
-		for _, v := range cpuLines[i] {
-			out.WriteString(fmt.Sprintf(" %d", v))
-		}
-		out.WriteByte('\n')
-	}
+
 	for _, line := range lines {
 		if strings.HasPrefix(line, "cpu") {
+			continue
+		}
+		if strings.HasPrefix(line, "btime ") && req.Container != nil {
+			out.WriteString(fmt.Sprintf("btime %d\n", req.Container.Ctime().Unix()))
 			continue
 		}
 		out.WriteString(line)
 		out.WriteByte('\n')
 	}
 	return out.Bytes(), nil
+}
+
+func procStatCPUTicks(req *domain.HandlerRequest, cpus int, fieldCount int, now time.Time) []uint64 {
+	uptime := 0.0
+	if req.Container != nil {
+		uptime = containerUptime(req.Container.Ctime(), now)
+	}
+
+	return procStatCPUTicksFromUsage(uptime, cpus, fieldCount, cpuUsageFromCgroup(cgroupForReq(req)))
+}
+
+func procStatCPUTicksFromUsage(uptime float64, cpus int, fieldCount int, usage containerCPUUsage) []uint64 {
+	if fieldCount < 4 {
+		fieldCount = 4
+	}
+	if cpus <= 0 {
+		cpus = 1
+	}
+
+	capacity := uptime * float64(cpus)
+	used := usage.UsageSeconds
+	if used > capacity {
+		used = capacity
+	}
+	if used < 0 {
+		used = 0
+	}
+
+	user := usage.UserSeconds
+	system := usage.SystemSeconds
+	if user+system == 0 && used > 0 {
+		user = used
+	}
+	if user+system > used && user+system > 0 {
+		scale := used / (user + system)
+		user *= scale
+		system *= scale
+	}
+
+	ticks := make([]uint64, fieldCount)
+	ticks[0] = secondsToProcStatTicks(user)
+	ticks[2] = secondsToProcStatTicks(system)
+	ticks[3] = secondsToProcStatTicks(capacity - used)
+	return ticks
+}
+
+func secondsToProcStatTicks(seconds float64) uint64 {
+	if seconds <= 0 {
+		return 0
+	}
+	return uint64(math.Round(seconds * procStatClockTicksPerSecond))
+}
+
+func splitProcStatCPUTicks(total []uint64, cpus int, index int) []uint64 {
+	if cpus <= 0 {
+		cpus = 1
+	}
+
+	out := make([]uint64, len(total))
+	for i, v := range total {
+		base := v / uint64(cpus)
+		rem := v % uint64(cpus)
+		out[i] = base
+		if uint64(index) < rem {
+			out[i]++
+		}
+	}
+	return out
+}
+
+func writeProcStatCPULine(out *bytes.Buffer, name string, values []uint64) {
+	out.WriteString(name)
+	for _, v := range values {
+		out.WriteString(fmt.Sprintf(" %d", v))
+	}
+	out.WriteByte('\n')
 }
 
 func readMemInfo(req *domain.HandlerRequest) ([]byte, error) {

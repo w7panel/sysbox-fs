@@ -21,8 +21,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -39,6 +37,20 @@ import (
 
 type ProcUptime struct {
 	domain.HandlerBase
+}
+
+type procUptimeSnapshot struct {
+	data      []byte
+	createdAt time.Time
+}
+
+const procUptimeSnapshotTTL = 100 * time.Millisecond
+
+var procUptimeSnapshots = struct {
+	sync.Mutex
+	entries map[string]procUptimeSnapshot
+}{
+	entries: make(map[string]procUptimeSnapshot),
 }
 
 var ProcUptime_Handler = &ProcUptime{
@@ -84,8 +96,7 @@ func (h *ProcUptime) Open(
 		return false, fuse.IOerror{Code: syscall.EACCES}
 	}
 
-	// /proc/uptime is not seekable
-	return true, nil
+	return false, nil
 }
 
 func (h *ProcUptime) Read(
@@ -186,12 +197,6 @@ func (h *ProcUptime) readUptime(
 
 	logrus.Debugf("Executing %v Read() method", h.Name)
 
-	// We are dealing with a single integer element being read, so we can save
-	// some cycles by returning right away if offset is any higher than zero.
-	if req.Offset > 0 {
-		return 0, io.EOF
-	}
-
 	cntr := req.Container
 
 	//
@@ -206,19 +211,44 @@ func (h *ProcUptime) readUptime(
 	// storage purposes.
 	//
 	// The first column in /proc/uptime is uptime in seconds, while the second
-	// column is cumulative CPU idle time. Rather than reading the host's
-	// /proc/uptime (which may be intercepted by sysbox-fs itself in the FUSE
-	// mount context), we approximate idle time from the container's own CPU
-	// cgroup stats, with a fallback to uptime if cgroup data is unavailable.
+	// column is cumulative idle time across the CPUs visible to the container.
 	//
-	uptime := containerUptime(ctime, time.Now())
-	idle := containerIdleFromCgroup(cntr, uptime)
+	data := procUptimeData(req, ctime, time.Now())
 
-	uptimeStr := fmt.Sprintf("%.2f %.2f\n", uptime, idle)
+	if req.Offset >= int64(len(data)) {
+		return 0, io.EOF
+	}
 
-	req.Data = []byte(uptimeStr)
+	copied := copy(req.Data, data[req.Offset:])
+	return copied, nil
+}
 
-	return len(req.Data), nil
+func procUptimeData(req *domain.HandlerRequest, ctime, now time.Time) []byte {
+	key := procUptimeSnapshotKey(req)
+
+	procUptimeSnapshots.Lock()
+	defer procUptimeSnapshots.Unlock()
+
+	snapshot, ok := procUptimeSnapshots.entries[key]
+	if ok && (req.Offset > 0 || now.Sub(snapshot.createdAt) < procUptimeSnapshotTTL) {
+		return snapshot.data
+	}
+
+	uptime := containerUptime(ctime, now)
+	idle := containerIdleFromReq(req, uptime)
+	data := []byte(fmt.Sprintf("%.2f %.2f\n", uptime, idle))
+	procUptimeSnapshots.entries[key] = procUptimeSnapshot{
+		data:      data,
+		createdAt: now,
+	}
+	return data
+}
+
+func procUptimeSnapshotKey(req *domain.HandlerRequest) string {
+	if req.Container != nil && req.Container.ID() != "" {
+		return req.Container.ID()
+	}
+	return fmt.Sprintf("pid:%d", req.Pid)
 }
 
 func containerUptime(ctime, now time.Time) float64 {
@@ -229,93 +259,48 @@ func containerUptime(ctime, now time.Time) float64 {
 	return now.Sub(ctime).Seconds()
 }
 
-// containerIdleFromCgroup reads the container's CPU cgroup stats to calculate
-// idle time. For cgroupv2 it reads cpu.stat ("usage_usec" field). For cgroupv1
-// it reads cpuacct.usage (nanoseconds). Falls back to uptime if cgroup data
-// is unavailable or unreadable.
+func containerIdleFromReq(req *domain.HandlerRequest, uptime float64) float64 {
+	cpus := effectiveCPUCount(req)
+	if cpus <= 0 {
+		cpus = 1
+	}
+	usage := cpuUsageFromCgroup(cgroupForReq(req))
+	return containerIdleFromUsage(uptime, cpus, usage.UsageSeconds)
+}
+
+func containerIdleFromUsage(uptime float64, cpus int, usageSeconds float64) float64 {
+	if uptime <= 0 {
+		return 0
+	}
+	if cpus <= 0 {
+		cpus = 1
+	}
+
+	capacity := uptime * float64(cpus)
+	idle := capacity - usageSeconds
+	if idle < 0 {
+		return 0
+	}
+	if idle > capacity {
+		return capacity
+	}
+	return idle
+}
+
+// containerIdleFromCgroup is retained for older unit tests and callers; new
+// handler paths should use containerIdleFromReq so CPU limits are considered.
 func containerIdleFromCgroup(cntr domain.ContainerIface, uptime float64) float64 {
 	if uptime <= 0 {
 		return 0
 	}
-
 	if cntr == nil {
 		return uptime
 	}
 
-	pid := cntr.InitPid()
-	if pid == 0 {
-		return uptime
+	req := &domain.HandlerRequest{Container: cntr}
+	cpus := effectiveCPUCount(req)
+	if cpus <= 0 {
+		cpus = 1
 	}
-
-	// Read /proc/<pid>/cgroup to find the container's cgroup path.
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
-	if err != nil {
-		return uptime
-	}
-
-	var v2Path string
-	var v1CpuacctPath string
-
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		parts := strings.SplitN(line, ":", 3)
-		if len(parts) != 3 {
-			continue
-		}
-		// cgroupv2: third field has no controller name (empty)
-		if parts[1] == "" {
-			v2Path = filepath.Clean(parts[2])
-			continue
-		}
-		// cgroupv1: look for cpuacct controller
-		for _, ctrl := range strings.Split(parts[1], ",") {
-			if ctrl == "cpuacct" {
-				v1CpuacctPath = filepath.Clean(parts[2])
-			}
-		}
-	}
-
-	// cgroupv2: read cpu.stat and parse usage_usec (microseconds).
-	if v2Path != "" {
-		cpuStat, err := os.ReadFile(filepath.Join("/sys/fs/cgroup", v2Path, "cpu.stat"))
-		if err == nil {
-			for _, line := range strings.Split(strings.TrimSpace(string(cpuStat)), "\n") {
-				fields := strings.Fields(line)
-				if len(fields) == 2 && fields[0] == "usage_usec" {
-					usageUsec, err := strconv.ParseUint(fields[1], 10, 64)
-					if err == nil {
-						cpuSeconds := float64(usageUsec) / 1_000_000
-						idle := uptime - cpuSeconds
-						if idle < 0 {
-							idle = 0
-						}
-						return idle
-					}
-				}
-			}
-		}
-	}
-
-	// cgroupv1: read cpuacct.usage (nanoseconds).
-	if v1CpuacctPath != "" {
-		candidates := []string{
-			filepath.Join("/sys/fs/cgroup", "cpuacct", v1CpuacctPath, "cpuacct.usage"),
-			filepath.Join("/sys/fs/cgroup", v1CpuacctPath, "cpuacct.usage"),
-		}
-		for _, path := range candidates {
-			cpuUsage, err := os.ReadFile(path)
-			if err == nil {
-				usageNs, err := strconv.ParseUint(strings.TrimSpace(string(cpuUsage)), 10, 64)
-				if err == nil {
-					cpuSeconds := float64(usageNs) / 1_000_000_000
-					idle := uptime - cpuSeconds
-					if idle < 0 {
-						idle = 0
-					}
-					return idle
-				}
-			}
-		}
-	}
-
-	return uptime
+	return containerIdleFromUsage(uptime, cpus, cpuUsageFromCgroup(cgroupForReq(req)).UsageSeconds)
 }

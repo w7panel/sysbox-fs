@@ -17,6 +17,7 @@
 package implementations
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -64,5 +65,65 @@ func writeCgroupFile(t *testing.T, base, cgPath, name, data string) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestProcStatCPUTicksUsesContainerTimeBase(t *testing.T) {
+	ticks := procStatCPUTicksFromUsage(100, 4, 10, containerCPUUsage{
+		UsageSeconds:  20,
+		UserSeconds:   12,
+		SystemSeconds: 8,
+	})
+
+	if ticks[0] != 1200 {
+		t.Fatalf("user ticks = %d, want 1200", ticks[0])
+	}
+	if ticks[2] != 800 {
+		t.Fatalf("system ticks = %d, want 800", ticks[2])
+	}
+	if ticks[3] != 38000 {
+		t.Fatalf("idle ticks = %d, want 38000", ticks[3])
+	}
+}
+
+func TestProcStatCPUTicksClampsUsageToCapacity(t *testing.T) {
+	ticks := procStatCPUTicksFromUsage(100, 1, 10, containerCPUUsage{
+		UsageSeconds:  200,
+		UserSeconds:   120,
+		SystemSeconds: 80,
+	})
+
+	if ticks[0]+ticks[2] != 10000 {
+		t.Fatalf("used ticks = %d, want 10000", ticks[0]+ticks[2])
+	}
+	if ticks[3] != 0 {
+		t.Fatalf("idle ticks = %d, want 0", ticks[3])
+	}
+}
+
+func TestSplitProcStatCPUTicksPreservesTotals(t *testing.T) {
+	total := []uint64{10, 0, 5, 7}
+	sum := make([]uint64, len(total))
+
+	for i := 0; i < 4; i++ {
+		part := splitProcStatCPUTicks(total, 4, i)
+		for j, v := range part {
+			sum[j] += v
+		}
+	}
+
+	for i, want := range total {
+		if sum[i] != want {
+			t.Fatalf("split total[%d] = %d, want %d", i, sum[i], want)
+		}
+	}
+}
+
+func TestWriteProcStatCPULine(t *testing.T) {
+	out := bytes.Buffer{}
+	writeProcStatCPULine(&out, "cpu0", []uint64{1, 2, 3, 4})
+
+	if got, want := out.String(), "cpu0 1 2 3 4\n"; got != want {
+		t.Fatalf("writeProcStatCPULine() = %q, want %q", got, want)
 	}
 }
