@@ -187,6 +187,27 @@ func TestContainerProcStatsMissingRoot(t *testing.T) {
 	}
 }
 
+func TestCalcLoadavg(t *testing.T) {
+	got := calcLoadavg(0, loadavgExp1, 1)
+	if got == 0 {
+		t.Fatal("calcLoadavg() returned 0 for one active task")
+	}
+}
+
+func TestLoadavgNodeFormat(t *testing.T) {
+	node := &loadavgNode{
+		avenrun: [3]uint64{loadavgFixed1, loadavgFixed1 / 2, 0},
+		running: 2,
+		total:   5,
+		lastPID: 9,
+	}
+
+	got := node.format()
+	if got != "1.00 0.50 0.00 2/5 9\n" {
+		t.Fatalf("loadavgNode.format() = %q", got)
+	}
+}
+
 func TestEnsureTrailingNewline(t *testing.T) {
 	if got := ensureTrailingNewline("some avg10=0.00"); got != "some avg10=0.00\n" {
 		t.Fatalf("ensureTrailingNewline() = %q", got)
