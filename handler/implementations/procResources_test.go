@@ -308,13 +308,13 @@ func TestSwapInfoV2MaxDoesNotExposeHostSwap(t *testing.T) {
 	}
 }
 
-func TestSwapInfoV1UsesSwapLimitDelta(t *testing.T) {
+func TestSwapInfoV1UsesMemswLimit(t *testing.T) {
 	info, ok := swapInfoV1FromLimits(512*1024, 768*1024, 64, 1024, 1)
 	if !ok {
 		t.Fatal("swapInfoV1FromLimits() ok = false, want true")
 	}
-	if info.totalKB != 256 {
-		t.Fatalf("totalKB = %d, want memsw-memory delta 256", info.totalKB)
+	if info.totalKB != 768 {
+		t.Fatalf("totalKB = %d, want memsw limit 768", info.totalKB)
 	}
 	if info.usedKB != 64 {
 		t.Fatalf("usedKB = %d, want 64", info.usedKB)

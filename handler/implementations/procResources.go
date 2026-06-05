@@ -1348,7 +1348,9 @@ func swapInfoForCgroup(cg cgroupView) swapInfo {
 }
 
 func swapInfoV2(cg cgroupView, hostSwapTotalKB uint64) (swapInfo, bool) {
-	if max, ok := cg.readV2("memory.swap.max"); ok {
+	if max, ok := cg.readV2Effective("memory.swap.max", func(s string) bool {
+		return s != "" && s != "max"
+	}); ok {
 		usedBytes, _ := parseUintValueFromV2(cg, "memory.swap.current")
 		return swapInfoV2FromMax(max, usedBytes, hostSwapTotalKB)
 	}
@@ -1386,7 +1388,7 @@ func swapInfoV1FromLimits(memLimit, memswLimit, usedKB, hostSwapTotalKB, swappin
 		return swapInfo{}, false
 	}
 
-	totalKB := (memswLimit - memLimit) / 1024
+	totalKB := memswLimit / 1024
 	return boundedSwapInfo(totalKB, usedKB, hostSwapTotalKB, swappiness), true
 }
 
