@@ -1,4 +1,3 @@
 [submodule "bazil"]
 	path = bazil
-	url = https://github.com/w7panel/fuse.git
-	branch = w7panel
+	url = https://github.com/nestybox/fuse.git
