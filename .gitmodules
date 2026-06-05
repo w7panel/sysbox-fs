@@ -1,3 +1,4 @@
 [submodule "bazil"]
 	path = bazil
-	url = ../fuse.git
+	url = https://github.com/w7panel/fuse.git
+	branch = w7panel

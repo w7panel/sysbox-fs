@@ -18,6 +18,7 @@ package implementations
 
 import (
 	"bytes"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -298,6 +299,31 @@ func TestBoundedSwapInfoCapsHostSwap(t *testing.T) {
 	}
 	if info.usedKB != 512 {
 		t.Fatalf("usedKB = %d, want 512", info.usedKB)
+	}
+}
+
+func TestSwapInfoV2MaxDoesNotExposeHostSwap(t *testing.T) {
+	if _, ok := swapInfoV2FromMax("max", 64*1024, 1024); ok {
+		t.Fatal("swapInfoV2FromMax() ok = true for max, want false")
+	}
+}
+
+func TestSwapInfoV1UsesSwapLimitDelta(t *testing.T) {
+	info, ok := swapInfoV1FromLimits(512*1024, 768*1024, 64, 1024, 1)
+	if !ok {
+		t.Fatal("swapInfoV1FromLimits() ok = false, want true")
+	}
+	if info.totalKB != 256 {
+		t.Fatalf("totalKB = %d, want memsw-memory delta 256", info.totalKB)
+	}
+	if info.usedKB != 64 {
+		t.Fatalf("usedKB = %d, want 64", info.usedKB)
+	}
+}
+
+func TestSwapInfoV1UnlimitedDoesNotExposeHostSwap(t *testing.T) {
+	if _, ok := swapInfoV1FromLimits(512*1024, uint64(math.MaxInt64), 64, 1024, 1); ok {
+		t.Fatal("swapInfoV1FromLimits() ok = true for unlimited memsw, want false")
 	}
 }
 
