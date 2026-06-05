@@ -905,27 +905,89 @@ func parseUintValueFromV1(cg cgroupView, ctrl, name string) (uint64, bool) {
 }
 
 func swapValues(cg cgroupView) (uint64, uint64) {
-	if max, ok := cg.readV2("memory.swap.max"); ok {
-		total, hasTotal := parseUintValue(max)
-		if !hasTotal {
-			return 0, 0
-		}
-		current, _ := parseUintValueFromV2(cg, "memory.swap.current")
-		return total, current
-	}
+	info := swapInfoForCgroup(cg)
+	return info.totalKB * 1024, info.usedKB * 1024
+}
 
+type swapInfo struct {
+	totalKB uint64
+	usedKB  uint64
+}
+
+func swapInfoForCgroup(cg cgroupView) swapInfo {
+	hostSwapTotal := hostSwapTotalKB()
+	if info, ok := swapInfoV2(cg, hostSwapTotal); ok {
+		return info
+	}
+	if info, ok := swapInfoV1(cg, hostSwapTotal); ok {
+		return info
+	}
+	return swapInfo{}
+}
+
+func swapInfoV2(cg cgroupView, hostSwapTotalKB uint64) (swapInfo, bool) {
+	if max, ok := cg.readV2("memory.swap.max"); ok {
+		totalBytes, hasTotal := parseUintValue(max)
+		totalKB := uint64(0)
+		if hasTotal {
+			totalKB = totalBytes / 1024
+		} else if max == "max" {
+			totalKB = hostSwapTotalKB
+		} else {
+			return swapInfo{}, false
+		}
+		usedBytes, _ := parseUintValueFromV2(cg, "memory.swap.current")
+		return boundedSwapInfo(totalKB, usedBytes/1024, hostSwapTotalKB, 1), true
+	}
+	return swapInfo{}, false
+}
+
+func swapInfoV1(cg cgroupView, hostSwapTotalKB uint64) (swapInfo, bool) {
 	memLimit, hasMemLimit := memoryLimit(cg)
 	memswLimit, hasMemswLimit := parseUintValueFromV1(cg, "memory", "memory.memsw.limit_in_bytes")
 	memUsage, _ := memoryUsage(cg)
 	memswUsage, _ := parseUintValueFromV1(cg, "memory", "memory.memsw.usage_in_bytes")
-	if hasMemLimit && hasMemswLimit && memswLimit > memLimit {
-		used := uint64(0)
-		if memswUsage > memUsage {
-			used = memswUsage - memUsage
-		}
-		return memswLimit - memLimit, used
+	if !hasMemLimit || !hasMemswLimit || memswLimit <= memLimit {
+		return swapInfo{}, false
 	}
-	return 0, 0
+
+	totalKB := memswLimit / 1024
+	usedKB := uint64(0)
+	if memswUsage > memUsage {
+		usedKB = (memswUsage - memUsage) / 1024
+	}
+	swappiness := cgroupSwappiness(cg)
+	return boundedSwapInfo(totalKB, usedKB, hostSwapTotalKB, swappiness), true
+}
+
+func boundedSwapInfo(totalKB, usedKB, hostSwapTotalKB, swappiness uint64) swapInfo {
+	if hostSwapTotalKB > 0 && totalKB > hostSwapTotalKB {
+		totalKB = hostSwapTotalKB
+	}
+	if swappiness == 0 {
+		totalKB = usedKB
+	}
+	if usedKB > totalKB {
+		usedKB = totalKB
+	}
+	return swapInfo{totalKB: totalKB, usedKB: usedKB}
+}
+
+func cgroupSwappiness(cg cgroupView) uint64 {
+	if value, ok := cg.readV1("memory", "memory.swappiness"); ok {
+		if parsed, parsedOk := parseUintValue(value); parsedOk {
+			return parsed
+		}
+	}
+	return 1
+}
+
+func hostSwapTotalKB() uint64 {
+	host, err := parseHostMeminfo()
+	if err != nil {
+		return 0
+	}
+	return host["SwapTotal"]
 }
 
 func parseUintValueFromV2(cg cgroupView, name string) (uint64, bool) {

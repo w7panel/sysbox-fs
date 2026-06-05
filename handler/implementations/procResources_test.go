@@ -208,6 +208,33 @@ func TestLoadavgNodeFormat(t *testing.T) {
 	}
 }
 
+func TestBoundedSwapInfoCapsHostSwap(t *testing.T) {
+	info := boundedSwapInfo(4096, 512, 1024, 1)
+	if info.totalKB != 1024 {
+		t.Fatalf("totalKB = %d, want host cap 1024", info.totalKB)
+	}
+	if info.usedKB != 512 {
+		t.Fatalf("usedKB = %d, want 512", info.usedKB)
+	}
+}
+
+func TestBoundedSwapInfoSwappinessZero(t *testing.T) {
+	info := boundedSwapInfo(4096, 512, 8192, 0)
+	if info.totalKB != 512 {
+		t.Fatalf("totalKB = %d, want usedKB when swappiness=0", info.totalKB)
+	}
+	if info.usedKB != 512 {
+		t.Fatalf("usedKB = %d, want 512", info.usedKB)
+	}
+}
+
+func TestBoundedSwapInfoClampsUsed(t *testing.T) {
+	info := boundedSwapInfo(256, 512, 1024, 1)
+	if info.usedKB != 256 {
+		t.Fatalf("usedKB = %d, want clamped total 256", info.usedKB)
+	}
+}
+
 func TestEnsureTrailingNewline(t *testing.T) {
 	if got := ensureTrailingNewline("some avg10=0.00"); got != "some avg10=0.00\n" {
 		t.Fatalf("ensureTrailingNewline() = %q", got)

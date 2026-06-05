@@ -196,11 +196,18 @@ func (h *ProcSwaps) readSwaps(
 
 func procSwapsData(req *domain.HandlerRequest) []byte {
 	out := swapsHeader + "\n"
-	total, used := swapValues(cgroupForReq(req))
-	if total == 0 {
+	if req == nil {
+		return []byte(out)
+	}
+	info := swapInfoForCgroup(cgroupForReq(req))
+	if info.totalKB == 0 {
 		return []byte(out)
 	}
 
-	out += fmt.Sprintf("none                                virtual         %d\t%d\t0\n", total/1024, used/1024)
+	out += formatProcSwapsVirtualLine(info)
 	return []byte(out)
+}
+
+func formatProcSwapsVirtualLine(info swapInfo) string {
+	return fmt.Sprintf("none%36svirtual\t\t%d\t%d\t0\n", "", info.totalKB, info.usedKB)
 }
