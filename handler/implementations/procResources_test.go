@@ -42,6 +42,25 @@ func TestReadV2MemoryUsageUsesEffectiveLimitCgroup(t *testing.T) {
 	}
 }
 
+func TestReadV2MemoryStatUsesEffectiveLimitCgroup(t *testing.T) {
+	base := t.TempDir()
+	containerPath := "kubepods/burstable/pod123/container456"
+	initScopePath := filepath.Join(containerPath, "init.scope")
+
+	writeCgroupFile(t, base, containerPath, "memory.max", "536870912\n")
+	writeCgroupFile(t, base, containerPath, "memory.stat", "anon 104857600\nfile 4096\n")
+	writeCgroupFile(t, base, initScopePath, "memory.max", "max\n")
+	writeCgroupFile(t, base, initScopePath, "memory.stat", "anon 40960\nfile 0\n")
+
+	stat, ok := readV2MemoryStatFrom(base, initScopePath)
+	if !ok {
+		t.Fatal("readV2MemoryStatFrom() ok = false, want true")
+	}
+	if stat != "anon 104857600\nfile 4096" {
+		t.Fatalf("readV2MemoryStatFrom() = %q, want parent memory.stat", stat)
+	}
+}
+
 func TestReadV2MemoryUsageFallsBackToLeafCgroup(t *testing.T) {
 	base := t.TempDir()
 	cgPath := "kubepods/besteffort/pod123/container456"
@@ -53,6 +72,20 @@ func TestReadV2MemoryUsageFallsBackToLeafCgroup(t *testing.T) {
 	}
 	if usage != "102400" {
 		t.Fatalf("readV2MemoryUsageFrom() = %q, want 102400", usage)
+	}
+}
+
+func TestReadV2MemoryStatFallsBackToLeafCgroup(t *testing.T) {
+	base := t.TempDir()
+	cgPath := "kubepods/besteffort/pod123/container456"
+	writeCgroupFile(t, base, cgPath, "memory.stat", "anon 102400\n")
+
+	stat, ok := readV2MemoryStatFrom(base, cgPath)
+	if !ok {
+		t.Fatal("readV2MemoryStatFrom() ok = false, want true")
+	}
+	if stat != "anon 102400" {
+		t.Fatalf("readV2MemoryStatFrom() = %q, want leaf memory.stat", stat)
 	}
 }
 

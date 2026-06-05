@@ -1172,7 +1172,7 @@ func readMemInfo(req *domain.HandlerRequest) ([]byte, error) {
 type memoryStat map[string]uint64
 
 func memoryStatValues(cg cgroupView) memoryStat {
-	if data, ok := cg.readV2("memory.stat"); ok {
+	if data, ok := cg.readV2MemoryStat(); ok {
 		return parseMemoryStat(data, false)
 	}
 	if data, ok := cg.readV1("memory", "memory.stat"); ok {
@@ -1268,22 +1268,43 @@ func memoryUsage(cg cgroupView) (uint64, bool) {
 	return parseUintValueFromV1(cg, "memory", "memory.usage_in_bytes")
 }
 
+func (c cgroupView) readV2MemoryStat() (string, bool) {
+	return readV2MemoryStatFrom("/sys/fs/cgroup", c.v2Path)
+}
+
+func readV2MemoryStatFrom(base, v2Path string) (string, bool) {
+	path, ok := effectiveV2MemoryCgroupPath(base, v2Path, "memory.stat")
+	if !ok {
+		return "", false
+	}
+	return readFirstExisting(filepath.Join(base, path, "memory.stat"))
+}
+
 func (c cgroupView) readV2MemoryUsage() (string, bool) {
 	return readV2MemoryUsageFrom("/sys/fs/cgroup", c.v2Path)
 }
 
 func readV2MemoryUsageFrom(base, v2Path string) (string, bool) {
+	path, ok := effectiveV2MemoryCgroupPath(base, v2Path, "memory.current")
+	if !ok {
+		return "", false
+	}
+	return readFirstExisting(filepath.Join(base, path, "memory.current"))
+}
+
+func effectiveV2MemoryCgroupPath(base, v2Path, requiredFile string) (string, bool) {
 	if v2Path == "" {
 		return "", false
 	}
 
-	fallback, fallbackOk := readFirstExisting(filepath.Join(base, v2Path, "memory.current"))
+	cleanPath := filepath.Clean(v2Path)
+	_, fallbackOk := readFirstExisting(filepath.Join(base, cleanPath, requiredFile))
 	cgPath := filepath.Clean(v2Path)
 	for {
 		max, ok := readFirstExisting(filepath.Join(base, cgPath, "memory.max"))
 		if ok && max != "" && max != "max" {
-			if usage, usageOk := readFirstExisting(filepath.Join(base, cgPath, "memory.current")); usageOk {
-				return usage, true
+			if _, fileOk := readFirstExisting(filepath.Join(base, cgPath, requiredFile)); fileOk {
+				return cgPath, true
 			}
 		}
 		if cgPath == "." || cgPath == "/" {
@@ -1292,7 +1313,10 @@ func readV2MemoryUsageFrom(base, v2Path string) (string, bool) {
 		cgPath = filepath.Dir(cgPath)
 	}
 
-	return fallback, fallbackOk
+	if fallbackOk {
+		return cleanPath, true
+	}
+	return "", false
 }
 
 func parseUintValueFromV1(cg cgroupView, ctrl, name string) (uint64, bool) {
