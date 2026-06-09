@@ -251,8 +251,15 @@ type cgroupView struct {
 }
 
 func cgroupForReq(req *domain.HandlerRequest) cgroupView {
-	pid := req.Pid
-	if req.Container != nil && req.Container.InitPid() != 0 {
+	if req != nil && req.Pid != 0 {
+		cg := cgroupForPid(req.Pid)
+		if cg.v2Path != "" || len(cg.v1) > 0 {
+			return cg
+		}
+	}
+
+	pid := uint32(0)
+	if req != nil && req.Container != nil && req.Container.InitPid() != 0 {
 		pid = req.Container.InitPid()
 	}
 	if pid == 0 {
