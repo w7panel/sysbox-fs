@@ -456,14 +456,14 @@ func passThroughProcResource(path string) resourceReader {
 }
 
 func readDiskstats(req *domain.HandlerRequest) ([]byte, error) {
-	cg := cgroupForReq(req)
+	cg := pruneInitScopeCgroup(cgroupForReq(req))
 	if data, ok := cg.readV2("io.stat"); ok && data != "" {
 		return diskstatsFromIOStat(data), nil
 	}
 	if data, ok := diskstatsFromBlkIO(cg); ok {
 		return data, nil
 	}
-	return []byte{}, nil
+	return hostFile("/proc/diskstats")
 }
 
 func readSlabinfo(req *domain.HandlerRequest) ([]byte, error) {
@@ -2154,22 +2154,46 @@ func namespacePID(hostPID int) int {
 }
 
 func diskstatsFromIOStat(data string) []byte {
-	devNames := diskstatsDeviceNames()
+	stats := parseIOStatValues(data)
+	return diskstatsFromIOStatValues(stats, diskstatsHostDevices())
+}
+
+func diskstatsFromIOStatValues(stats map[string]map[string]uint64, devices []diskDevice) []byte {
 	out := bytes.Buffer{}
+	seen := map[string]struct{}{}
+	for _, device := range devices {
+		values := stats[device.key()]
+		if len(values) == 0 {
+			continue
+		}
+		if writeIOStatDiskstatsLine(&out, device, values) {
+			seen[device.key()] = struct{}{}
+		}
+	}
+	for dev, values := range stats {
+		if _, ok := seen[dev]; ok {
+			continue
+		}
+		device, ok := diskDeviceFromKey(dev)
+		if !ok {
+			continue
+		}
+		if device.name == "" {
+			device.name = fmt.Sprintf("dev%d_%d", device.major, device.minor)
+		}
+		writeIOStatDiskstatsLine(&out, device, values)
+	}
+	return out.Bytes()
+}
+
+func parseIOStatValues(data string) map[string]map[string]uint64 {
+	out := map[string]map[string]uint64{}
 	for _, line := range strings.Split(strings.TrimSpace(data), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 || !strings.Contains(fields[0], ":") {
 			continue
 		}
 		dev := fields[0]
-		parts := strings.SplitN(dev, ":", 2)
-		major, majorErr := strconv.ParseUint(parts[0], 10, 64)
-		minor, minorErr := strconv.ParseUint(parts[1], 10, 64)
-		if majorErr != nil || minorErr != nil {
-			continue
-		}
-
-		values := map[string]uint64{}
 		for _, field := range fields[1:] {
 			kv := strings.SplitN(field, "=", 2)
 			if len(kv) != 2 {
@@ -2177,24 +2201,29 @@ func diskstatsFromIOStat(data string) []byte {
 			}
 			v, err := strconv.ParseUint(kv[1], 10, 64)
 			if err == nil {
-				values[kv[0]] = v
+				if out[dev] == nil {
+					out[dev] = map[string]uint64{}
+				}
+				out[dev][kv[0]] = v
 			}
 		}
-
-		name := devNames[dev]
-		if name == "" {
-			name = fmt.Sprintf("dev%s_%s", parts[0], parts[1])
-		}
-		readSectors := values["rbytes"] / 512
-		writeSectors := values["wbytes"] / 512
-		discardSectors := values["dbytes"] / 512
-		out.WriteString(fmt.Sprintf("%4d %7d %-8s %d 0 %d 0 %d 0 %d 0 0 0 0 %d 0 %d 0\n",
-			major, minor, name,
-			values["rios"], readSectors,
-			values["wios"], writeSectors,
-			values["dios"], discardSectors))
 	}
-	return out.Bytes()
+	return out
+}
+
+func writeIOStatDiskstatsLine(out *bytes.Buffer, device diskDevice, values map[string]uint64) bool {
+	readSectors := values["rbytes"] / 512
+	writeSectors := values["wbytes"] / 512
+	discardSectors := values["dbytes"] / 512
+	if values["rios"]+values["wios"]+values["dios"]+readSectors+writeSectors+discardSectors == 0 {
+		return false
+	}
+	out.WriteString(fmt.Sprintf("%d       %d %s %d 0 %d 0 %d 0 %d 0 0 0 0 %d 0 %d 0\n",
+		device.major, device.minor, device.name,
+		values["rios"], readSectors,
+		values["wios"], writeSectors,
+		values["dios"], discardSectors))
+	return true
 }
 
 type blkIOStats struct {
@@ -2207,58 +2236,69 @@ type blkIOStats struct {
 
 func diskstatsFromBlkIO(cg cgroupView) ([]byte, bool) {
 	stats := blkIOStats{
-		serviced:     readBlkIOValues(cg, "blkio.throttle.io_serviced", "blkio.io_serviced"),
-		merged:       readBlkIOValues(cg, "blkio.io_merged"),
-		serviceBytes: readBlkIOValues(cg, "blkio.throttle.io_service_bytes", "blkio.io_service_bytes"),
-		waitTime:     readBlkIOValues(cg, "blkio.io_wait_time"),
-		serviceTime:  readBlkIOValues(cg, "blkio.io_service_time"),
+		serviced:     readBlkIOValues(cg, "blkio.io_serviced_recursive", "blkio.throttle.io_serviced", "blkio.io_serviced"),
+		merged:       readBlkIOValues(cg, "blkio.io_merged_recursive", "blkio.io_merged"),
+		serviceBytes: readBlkIOValues(cg, "blkio.io_service_bytes_recursive", "blkio.throttle.io_service_bytes", "blkio.io_service_bytes"),
+		waitTime:     readBlkIOValues(cg, "blkio.io_wait_time_recursive", "blkio.io_wait_time"),
+		serviceTime:  readBlkIOValues(cg, "blkio.io_service_time_recursive", "blkio.io_service_time"),
 	}
 	if len(stats.serviced) == 0 && len(stats.serviceBytes) == 0 {
 		return nil, false
 	}
 
-	devNames := diskstatsDeviceNames()
+	return diskstatsFromBlkIOStats(stats, diskstatsHostDevices())
+}
+
+func diskstatsFromBlkIOStats(stats blkIOStats, devices []diskDevice) ([]byte, bool) {
 	out := bytes.Buffer{}
+	seen := map[string]struct{}{}
+	for _, device := range devices {
+		if writeBlkIODiskstatsLine(&out, device, stats) {
+			seen[device.key()] = struct{}{}
+		}
+	}
 	for dev := range mergeBlkIODevices(stats) {
-		parts := strings.SplitN(dev, ":", 2)
-		if len(parts) != 2 {
+		if _, ok := seen[dev]; ok {
 			continue
 		}
-		major, majorErr := strconv.ParseUint(parts[0], 10, 64)
-		minor, minorErr := strconv.ParseUint(parts[1], 10, 64)
-		if majorErr != nil || minorErr != nil {
+		device, ok := diskDeviceFromKey(dev)
+		if !ok {
 			continue
 		}
-		name := devNames[dev]
-		if name == "" {
-			name = fmt.Sprintf("dev%s_%s", parts[0], parts[1])
+		if device.name == "" {
+			device.name = fmt.Sprintf("dev%d_%d", device.major, device.minor)
 		}
-
-		read := blkIOOp(stats.serviced, dev, "Read")
-		write := blkIOOp(stats.serviced, dev, "Write")
-		discard := blkIOOp(stats.serviced, dev, "Discard")
-		readMerged := blkIOOp(stats.merged, dev, "Read")
-		writeMerged := blkIOOp(stats.merged, dev, "Write")
-		discardMerged := blkIOOp(stats.merged, dev, "Discard")
-		readSectors := blkIOOp(stats.serviceBytes, dev, "Read") / 512
-		writeSectors := blkIOOp(stats.serviceBytes, dev, "Write") / 512
-		discardSectors := blkIOOp(stats.serviceBytes, dev, "Discard") / 512
-		readTicks := nsToMs(blkIOOp(stats.serviceTime, dev, "Read") + blkIOOp(stats.waitTime, dev, "Read"))
-		writeTicks := nsToMs(blkIOOp(stats.serviceTime, dev, "Write") + blkIOOp(stats.waitTime, dev, "Write"))
-		discardTicks := nsToMs(blkIOOp(stats.serviceTime, dev, "Discard") + blkIOOp(stats.waitTime, dev, "Discard"))
-		totalTicks := nsToMs(blkIOOp(stats.serviceTime, dev, "Total"))
-
-		if read+write+discard+readMerged+writeMerged+discardMerged+readSectors+writeSectors+discardSectors+readTicks+writeTicks+discardTicks+totalTicks == 0 {
-			continue
-		}
-		out.WriteString(fmt.Sprintf("%d       %d %s %d %d %d %d %d %d %d %d 0 %d 0 %d %d %d %d\n",
-			major, minor, name,
-			read, readMerged, readSectors, readTicks,
-			write, writeMerged, writeSectors, writeTicks,
-			totalTicks,
-			discard, discardMerged, discardSectors, discardTicks))
+		writeBlkIODiskstatsLine(&out, device, stats)
 	}
 	return out.Bytes(), out.Len() > 0
+}
+
+func writeBlkIODiskstatsLine(out *bytes.Buffer, device diskDevice, stats blkIOStats) bool {
+	dev := device.key()
+	read := blkIOOp(stats.serviced, dev, "Read")
+	write := blkIOOp(stats.serviced, dev, "Write")
+	discard := blkIOOp(stats.serviced, dev, "Discard")
+	readMerged := blkIOOp(stats.merged, dev, "Read")
+	writeMerged := blkIOOp(stats.merged, dev, "Write")
+	discardMerged := blkIOOp(stats.merged, dev, "Discard")
+	readSectors := blkIOOp(stats.serviceBytes, dev, "Read") / 512
+	writeSectors := blkIOOp(stats.serviceBytes, dev, "Write") / 512
+	discardSectors := blkIOOp(stats.serviceBytes, dev, "Discard") / 512
+	readTicks := nsToMs(blkIOOp(stats.serviceTime, dev, "Read") + blkIOOp(stats.waitTime, dev, "Read"))
+	writeTicks := nsToMs(blkIOOp(stats.serviceTime, dev, "Write") + blkIOOp(stats.waitTime, dev, "Write"))
+	discardTicks := nsToMs(blkIOOp(stats.serviceTime, dev, "Discard") + blkIOOp(stats.waitTime, dev, "Discard"))
+	totalTicks := nsToMs(blkIOOp(stats.serviceTime, dev, "Total"))
+
+	if read+write+discard+readMerged+writeMerged+discardMerged+readSectors+writeSectors+discardSectors+readTicks+writeTicks+discardTicks+totalTicks == 0 {
+		return false
+	}
+	out.WriteString(fmt.Sprintf("%d       %d %s %d %d %d %d %d %d %d %d 0 %d 0 %d %d %d %d\n",
+		device.major, device.minor, device.name,
+		read, readMerged, readSectors, readTicks,
+		write, writeMerged, writeSectors, writeTicks,
+		totalTicks,
+		discard, discardMerged, discardSectors, discardTicks))
+	return true
 }
 
 func readBlkIOValues(cg cgroupView, names ...string) map[string]map[string]uint64 {
@@ -2310,19 +2350,54 @@ func nsToMs(ns uint64) uint64 {
 	return ns / 1_000_000
 }
 
-func diskstatsDeviceNames() map[string]string {
+type diskDevice struct {
+	major uint64
+	minor uint64
+	name  string
+}
+
+func (d diskDevice) key() string {
+	return fmt.Sprintf("%d:%d", d.major, d.minor)
+}
+
+func diskDeviceFromKey(key string) (diskDevice, bool) {
+	parts := strings.SplitN(key, ":", 2)
+	if len(parts) != 2 {
+		return diskDevice{}, false
+	}
+	major, majorErr := strconv.ParseUint(parts[0], 10, 64)
+	minor, minorErr := strconv.ParseUint(parts[1], 10, 64)
+	if majorErr != nil || minorErr != nil {
+		return diskDevice{}, false
+	}
+	return diskDevice{major: major, minor: minor}, true
+}
+
+func diskstatsHostDevices() []diskDevice {
 	data, err := os.ReadFile("/proc/diskstats")
 	if err != nil {
 		return nil
 	}
-	names := map[string]string{}
+	return parseDiskstatsDevices(string(data))
+}
+
+func parseDiskstatsDevices(data string) []diskDevice {
+	devices := []diskDevice{}
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) >= 3 {
-			names[fields[0]+":"+fields[1]] = fields[2]
+			major, majorErr := strconv.ParseUint(fields[0], 10, 64)
+			minor, minorErr := strconv.ParseUint(fields[1], 10, 64)
+			if majorErr == nil && minorErr == nil {
+				devices = append(devices, diskDevice{
+					major: major,
+					minor: minor,
+					name:  fields[2],
+				})
+			}
 		}
 	}
-	return names
+	return devices
 }
 
 func ensureTrailingNewline(data string) string {

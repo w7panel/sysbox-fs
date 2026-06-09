@@ -281,12 +281,41 @@ func TestParseCPUQuota(t *testing.T) {
 }
 
 func TestDiskstatsFromIOStat(t *testing.T) {
-	got := string(diskstatsFromIOStat("8:0 rbytes=1024 wbytes=2048 rios=3 wios=4 dbytes=512 dios=1\n"))
+	stats := parseIOStatValues("8:0 rbytes=1024 wbytes=2048 rios=3 wios=4 dbytes=512 dios=1\n")
+	got := string(diskstatsFromIOStatValues(stats, []diskDevice{{major: 8, minor: 0, name: "sda"}}))
 
 	if !bytes.Contains([]byte(got), []byte("8")) ||
 		!bytes.Contains([]byte(got), []byte("3 0 2 0")) ||
 		!bytes.Contains([]byte(got), []byte("4 0 4 0")) {
 		t.Fatalf("diskstatsFromIOStat() = %q, want converted io counters", got)
+	}
+}
+
+func TestDiskstatsFromBlkIOStatsUsesDiskstatsOrder(t *testing.T) {
+	stats := blkIOStats{
+		serviced: map[string]map[string]uint64{
+			"8:16": {"Read": 1},
+			"8:0":  {"Write": 2},
+		},
+		serviceBytes: map[string]map[string]uint64{
+			"8:16": {"Read": 1024},
+			"8:0":  {"Write": 2048},
+		},
+	}
+
+	got, ok := diskstatsFromBlkIOStats(stats, []diskDevice{
+		{major: 8, minor: 0, name: "sda"},
+		{major: 8, minor: 16, name: "sdb"},
+	})
+	if !ok {
+		t.Fatal("diskstatsFromBlkIOStats() ok = false, want true")
+	}
+	lines := strings.Split(strings.TrimSpace(string(got)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("diskstatsFromBlkIOStats() line count = %d, want 2: %q", len(lines), got)
+	}
+	if !strings.Contains(lines[0], "8       0 sda") || !strings.Contains(lines[1], "8       16 sdb") {
+		t.Fatalf("diskstatsFromBlkIOStats() = %q, want host diskstats order", got)
 	}
 }
 
