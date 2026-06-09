@@ -314,6 +314,19 @@ func TestNamespacePIDFromStatusUsesInnermostNSpid(t *testing.T) {
 	}
 }
 
+func TestPruneInitScopePath(t *testing.T) {
+	tests := map[string]string{
+		"/init.scope":                        "/",
+		"/kubepods/pod/container/init.scope": "/kubepods/pod/container",
+		"/kubepods/pod/container":            "/kubepods/pod/container",
+	}
+	for input, want := range tests {
+		if got := pruneInitScopePath(input); got != want {
+			t.Fatalf("pruneInitScopePath(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestBoundedSwapInfoCapsHostSwap(t *testing.T) {
 	info := boundedSwapInfo(4096, 512, 1024, 1)
 	if info.totalKB != 1024 {

@@ -1526,6 +1526,7 @@ func loadavgNodeKey(req *domain.HandlerRequest) (string, int) {
 	}
 
 	cg := cgroupForPid(uint32(pid))
+	cg = pruneInitScopeCgroup(cg)
 	if cg.v2Path != "" {
 		return "cpu:" + cg.v2Path, pid
 	}
@@ -1588,7 +1589,7 @@ func (s *loadavgSamplerState) refresh(node *loadavgNode) {
 }
 
 func loadavgStatsForPID(pid int) (int, int, int) {
-	if total, running, lastPID, ok := cgroupTaskStats(cgroupForPid(uint32(pid))); ok {
+	if total, running, lastPID, ok := cgroupTaskStats(pruneInitScopeCgroup(cgroupForPid(uint32(pid)))); ok {
 		return total, running, lastPID
 	}
 	if total, running, lastPID, ok := samePIDNamespaceStats(pid); ok {
@@ -1698,6 +1699,22 @@ func visibleProcessStatsFromCgroup(target cgroupView) (int, int, int) {
 		}
 	}
 	return count, running, lastPID
+}
+
+func pruneInitScopeCgroup(cg cgroupView) cgroupView {
+	cg.v2Path = pruneInitScopePath(cg.v2Path)
+	for ctrl, path := range cg.v1 {
+		cg.v1[ctrl] = pruneInitScopePath(path)
+	}
+	return cg
+}
+
+func pruneInitScopePath(path string) string {
+	path = filepath.Clean(path)
+	if path == "/init.scope" {
+		return "/"
+	}
+	return strings.TrimSuffix(path, "/init.scope")
 }
 
 func cgroupTaskStats(cg cgroupView) (int, int, int, bool) {
