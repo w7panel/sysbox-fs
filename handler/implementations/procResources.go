@@ -43,6 +43,7 @@ const (
 	procStatStateStaleAfter     = 5 * time.Minute
 	loadavgSampleInterval       = 5 * time.Second
 	loadavgStaleAfter           = 5 * time.Minute
+	loadavgCgroupDepth          = 3
 	loadavgFShift               = uint64(11)
 	loadavgFixed1               = uint64(1) << loadavgFShift
 	loadavgExp1                 = uint64(1884)
@@ -1524,16 +1525,15 @@ func loadavgNodeKey(req *domain.HandlerRequest) (string, int) {
 		pid = int(req.Container.InitPid())
 	}
 
-	if ns, err := os.Readlink(fmt.Sprintf("/proc/%d/ns/pid", pid)); err == nil {
-		return "pidns:" + ns, pid
-	}
-
 	cg := cgroupForPid(uint32(pid))
 	if cg.v2Path != "" {
 		return "cpu:" + cg.v2Path, pid
 	}
 	if cg.v1["cpu"] != "" {
 		return "cpu:" + cg.v1["cpu"], pid
+	}
+	if ns, err := os.Readlink(fmt.Sprintf("/proc/%d/ns/pid", pid)); err == nil {
+		return "pidns:" + ns, pid
 	}
 	return fmt.Sprintf("pid:%d", pid), pid
 }
@@ -1588,6 +1588,9 @@ func (s *loadavgSamplerState) refresh(node *loadavgNode) {
 }
 
 func loadavgStatsForPID(pid int) (int, int, int) {
+	if total, running, lastPID, ok := cgroupTaskStats(cgroupForPid(uint32(pid))); ok {
+		return total, running, lastPID
+	}
 	if total, running, lastPID, ok := samePIDNamespaceStats(pid); ok {
 		return total, running, lastPID
 	}
@@ -1690,11 +1693,94 @@ func visibleProcessStatsFromCgroup(target cgroupView) (int, int, int) {
 		if nsPID > lastPID {
 			lastPID = nsPID
 		}
-		if state, ok := procState(filepath.Join("/proc", entry.Name(), "status")); ok && state == "R" {
+		if state, ok := procState(filepath.Join("/proc", entry.Name(), "status")); ok && loadavgActiveState(state) {
 			running++
 		}
 	}
 	return count, running, lastPID
+}
+
+func cgroupTaskStats(cg cgroupView) (int, int, int, bool) {
+	pids := cgroupProcessPIDs(cg)
+	if len(pids) == 0 {
+		return 0, 0, 0, false
+	}
+
+	total := 0
+	running := 0
+	lastPID := 0
+	for pid := range pids {
+		taskDir := filepath.Join("/proc", strconv.Itoa(pid), "task")
+		entries, err := os.ReadDir(taskDir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			tid, err := strconv.Atoi(entry.Name())
+			if err != nil {
+				continue
+			}
+			total++
+			statusPath := filepath.Join(taskDir, entry.Name(), "status")
+			nsPID := namespacePIDFromStatus(statusPath, tid)
+			if nsPID > lastPID {
+				lastPID = nsPID
+			}
+			if state, ok := procState(statusPath); ok && loadavgActiveState(state) {
+				running++
+			}
+		}
+	}
+
+	return total, running, lastPID, total > 0
+}
+
+func cgroupProcessPIDs(cg cgroupView) map[int]struct{} {
+	pids := map[int]struct{}{}
+	if cg.v2Path != "" {
+		collectCgroupProcessPIDs(filepath.Join("/sys/fs/cgroup", cg.v2Path), loadavgCgroupDepth, pids)
+		return pids
+	}
+	if path := cg.v1["cpu"]; path != "" {
+		for _, base := range []string{
+			filepath.Join("/sys/fs/cgroup", "cpu", path),
+			filepath.Join("/sys/fs/cgroup", path),
+		} {
+			collectCgroupProcessPIDs(base, loadavgCgroupDepth, pids)
+			if len(pids) > 0 {
+				return pids
+			}
+		}
+	}
+	return pids
+}
+
+func collectCgroupProcessPIDs(dir string, depth int, pids map[int]struct{}) {
+	data, err := os.ReadFile(filepath.Join(dir, "cgroup.procs"))
+	if err == nil {
+		for _, field := range strings.Fields(string(data)) {
+			pid, err := strconv.Atoi(field)
+			if err == nil {
+				pids[pid] = struct{}{}
+			}
+		}
+	}
+	if depth <= 0 {
+		return
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			collectCgroupProcessPIDs(filepath.Join(dir, entry.Name()), depth-1, pids)
+		}
+	}
 }
 
 func samePIDNamespaceStats(initPID int) (int, int, int, bool) {
@@ -1727,7 +1813,7 @@ func samePIDNamespaceStats(initPID int) (int, int, int, bool) {
 		if nsPID > lastPID {
 			lastPID = nsPID
 		}
-		if state, ok := procState(filepath.Join("/proc", entry.Name(), "status")); ok && state == "R" {
+		if state, ok := procState(filepath.Join("/proc", entry.Name(), "status")); ok && loadavgActiveState(state) {
 			running++
 		}
 	}
@@ -1756,7 +1842,7 @@ func containerProcStats(initPID int) (int, int, int, bool) {
 			lastPID = pid
 		}
 		state, ok := procState(filepath.Join("/proc", strconv.Itoa(initPID), "root/proc", entry.Name(), "status"))
-		if ok && state == "R" {
+		if ok && loadavgActiveState(state) {
 			running++
 		}
 	}
@@ -1778,6 +1864,31 @@ func procState(statusPath string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func loadavgActiveState(state string) bool {
+	return state == "R" || state == "D"
+}
+
+func namespacePIDFromStatus(statusPath string, fallback int) int {
+	data, err := os.ReadFile(statusPath)
+	if err != nil {
+		return fallback
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "NSpid:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			return fallback
+		}
+		pid, err := strconv.Atoi(fields[len(fields)-1])
+		if err == nil {
+			return pid
+		}
+	}
+	return fallback
 }
 
 func descendantProcessCount(initPID int) int {

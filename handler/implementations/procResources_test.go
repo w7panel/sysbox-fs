@@ -292,6 +292,28 @@ func TestLoadavgNodeFormat(t *testing.T) {
 	}
 }
 
+func TestLoadavgActiveStateIncludesUninterruptibleTasks(t *testing.T) {
+	for _, state := range []string{"R", "D"} {
+		if !loadavgActiveState(state) {
+			t.Fatalf("loadavgActiveState(%q) = false, want true", state)
+		}
+	}
+	if loadavgActiveState("S") {
+		t.Fatal("loadavgActiveState(\"S\") = true, want false")
+	}
+}
+
+func TestNamespacePIDFromStatusUsesInnermostNSpid(t *testing.T) {
+	statusPath := filepath.Join(t.TempDir(), "status")
+	if err := os.WriteFile(statusPath, []byte("Name:\tt\nNSpid:\t100\t7\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := namespacePIDFromStatus(statusPath, 100); got != 7 {
+		t.Fatalf("namespacePIDFromStatus() = %d, want 7", got)
+	}
+}
+
 func TestBoundedSwapInfoCapsHostSwap(t *testing.T) {
 	info := boundedSwapInfo(4096, 512, 1024, 1)
 	if info.totalKB != 1024 {
