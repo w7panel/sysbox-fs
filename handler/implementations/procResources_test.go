@@ -21,6 +21,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -226,6 +227,56 @@ func TestCPURangeForCount(t *testing.T) {
 		if got := cpuRangeForCount(tc.count); got != tc.want {
 			t.Fatalf("cpuRangeForCount(%d) = %q, want %q", tc.count, got, tc.want)
 		}
+	}
+}
+
+func TestCPUInfoFromHostFiltersByCPUSetAndRenumbers(t *testing.T) {
+	host := []byte(strings.Join([]string{
+		"processor\t: 0\nmodel name\t: cpu0",
+		"processor\t: 1\nmodel name\t: cpu1",
+		"processor\t: 2\nmodel name\t: cpu2",
+		"processor\t: 3\nmodel name\t: cpu3",
+	}, "\n\n"))
+
+	got := string(cpuInfoFromHost(host, "1,3", 0))
+	want := "processor\t: 0\nmodel name\t: cpu1\n\nprocessor\t: 1\nmodel name\t: cpu3\n"
+	if got != want {
+		t.Fatalf("cpuInfoFromHost() = %q, want %q", got, want)
+	}
+}
+
+func TestCPUInfoFromHostAppliesQuotaLimit(t *testing.T) {
+	host := []byte(strings.Join([]string{
+		"processor\t: 0\nmodel name\t: cpu0",
+		"processor\t: 1\nmodel name\t: cpu1",
+		"processor\t: 2\nmodel name\t: cpu2",
+	}, "\n\n"))
+
+	got := string(cpuInfoFromHost(host, "0-2", 2))
+	want := "processor\t: 0\nmodel name\t: cpu0\n\nprocessor\t: 1\nmodel name\t: cpu1\n"
+	if got != want {
+		t.Fatalf("cpuInfoFromHost() = %q, want %q", got, want)
+	}
+}
+
+func TestCPUInCPUSet(t *testing.T) {
+	if !cpuInCPUSet(2, "0,2-3") {
+		t.Fatal("cpuInCPUSet(2, \"0,2-3\") = false, want true")
+	}
+	if !cpuInCPUSet(2, "3-2") {
+		t.Fatal("cpuInCPUSet(2, \"3-2\") = false, want true")
+	}
+	if cpuInCPUSet(4, "0,2-3") {
+		t.Fatal("cpuInCPUSet(4, \"0,2-3\") = true, want false")
+	}
+}
+
+func TestParseCPUQuota(t *testing.T) {
+	if got, ok := parseCPUQuota("250000 100000"); !ok || got != 2.5 {
+		t.Fatalf("parseCPUQuota() = %v, %v; want 2.5, true", got, ok)
+	}
+	if _, ok := parseCPUQuota("max 100000"); ok {
+		t.Fatal("parseCPUQuota(max) ok = true, want false")
 	}
 }
 

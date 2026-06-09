@@ -491,11 +491,21 @@ func readCPUPresent(req *domain.HandlerRequest) ([]byte, error) {
 }
 
 func readRawCPUSet(req *domain.HandlerRequest) (string, bool) {
-	cg := cgroupForReq(req)
+	return readCPUSetFromCgroup(cgroupForReq(req))
+}
+
+func readCPUSetFromCgroup(cg cgroupView) (string, bool) {
+	cg = pruneInitScopeCgroup(cg)
+	if cpus, ok := cg.readV2("cpuset.cpus"); ok && cpus != "" {
+		return cpus, true
+	}
 	if cpus, ok := cg.readV2("cpuset.cpus.effective"); ok && cpus != "" {
 		return cpus, true
 	}
-	if cpus, ok := cg.readV2("cpuset.cpus"); ok && cpus != "" {
+	if cpus, ok := cg.readV2Effective("cpuset.cpus", func(s string) bool { return s != "" }); ok {
+		return cpus, true
+	}
+	if cpus, ok := cg.readV2Effective("cpuset.cpus.effective", func(s string) bool { return s != "" }); ok {
 		return cpus, true
 	}
 	if cpus, ok := cg.readV1("cpuset", "cpuset.cpus"); ok && cpus != "" {
@@ -508,48 +518,107 @@ func readRawCPUSet(req *domain.HandlerRequest) (string, bool) {
 }
 
 func effectiveCPUCount(req *domain.HandlerRequest) int {
-	cg := cgroupForReq(req)
+	cg := pruneInitScopeCgroup(cgroupForReq(req))
 	limit := 0
 	if online, ok := readRawCPUSet(req); ok {
 		limit = countCPURange(online)
 	}
 
-	if max, ok := cg.readV2("cpu.max"); ok {
-		if fields := strings.Fields(max); len(fields) >= 2 && fields[0] == "max" {
-			max, _ = cg.readV2Effective("cpu.max", func(s string) bool {
-				fields := strings.Fields(s)
-				return len(fields) >= 2 && fields[0] != "max"
-			})
-		}
-		fields := strings.Fields(max)
-		if len(fields) >= 2 && fields[0] != "max" {
-			quota, qerr := strconv.ParseFloat(fields[0], 64)
-			period, perr := strconv.ParseFloat(fields[1], 64)
-			if qerr == nil && perr == nil && period > 0 {
-				n := int(math.Ceil(quota / period))
-				if n > 0 && (limit == 0 || n < limit) {
-					limit = n
-				}
-			}
-		}
-	}
-
-	if quotaStr, ok := cg.readV1("cpu", "cpu.cfs_quota_us"); ok {
-		periodStr, _ := cg.readV1("cpu", "cpu.cfs_period_us")
-		quota, qerr := strconv.ParseFloat(strings.TrimSpace(quotaStr), 64)
-		period, perr := strconv.ParseFloat(strings.TrimSpace(periodStr), 64)
-		if qerr == nil && perr == nil && quota > 0 && period > 0 {
-			n := int(math.Ceil(quota / period))
-			if n > 0 && (limit == 0 || n < limit) {
-				limit = n
-			}
-		}
+	if quotaLimit := cpuQuotaLimit(cg); quotaLimit > 0 && (limit == 0 || quotaLimit < limit) {
+		limit = quotaLimit
 	}
 
 	if limit <= 0 {
 		return hostCPUCount()
 	}
 	return limit
+}
+
+func cpuQuotaLimit(cg cgroupView) int {
+	if quota, ok := minCPUQuota(cg); ok {
+		n := int(math.Ceil(quota))
+		if n > 0 {
+			if hostCount := hostCPUCount(); n > hostCount {
+				return hostCount
+			}
+			return n
+		}
+	}
+	return 0
+}
+
+func minCPUQuota(cg cgroupView) (float64, bool) {
+	minQuota := 0.0
+	found := false
+	if cg.v2Path != "" {
+		for _, path := range cgroupPathAncestors(cg.v2Path) {
+			if data, ok := readFirstExisting(filepath.Join("/sys/fs/cgroup", path, "cpu.max")); ok {
+				if quota, ok := parseCPUQuota(data); ok && (!found || quota < minQuota) {
+					minQuota = quota
+					found = true
+				}
+			}
+		}
+		return minQuota, found
+	}
+	if path := cg.v1["cpu"]; path != "" {
+		for _, ancestor := range cgroupPathAncestors(path) {
+			if quota, ok := readCPUQuotaV1At(ancestor); ok && (!found || quota < minQuota) {
+				minQuota = quota
+				found = true
+			}
+		}
+	}
+	return minQuota, found
+}
+
+func parseCPUQuota(data string) (float64, bool) {
+	fields := strings.Fields(data)
+	if len(fields) < 2 || fields[0] == "max" {
+		return 0, false
+	}
+	quota, qerr := strconv.ParseFloat(fields[0], 64)
+	period, perr := strconv.ParseFloat(fields[1], 64)
+	if qerr != nil || perr != nil || quota < 0 || period <= 0 {
+		return 0, false
+	}
+	return quota / period, true
+}
+
+func readCPUQuotaV1At(path string) (float64, bool) {
+	quotaStr, quotaOK := readFirstExisting(
+		filepath.Join("/sys/fs/cgroup", "cpu", path, "cpu.cfs_quota_us"),
+		filepath.Join("/sys/fs/cgroup", path, "cpu.cfs_quota_us"),
+	)
+	if !quotaOK {
+		return 0, false
+	}
+	periodStr, periodOK := readFirstExisting(
+		filepath.Join("/sys/fs/cgroup", "cpu", path, "cpu.cfs_period_us"),
+		filepath.Join("/sys/fs/cgroup", path, "cpu.cfs_period_us"),
+	)
+	if !periodOK {
+		return 0, false
+	}
+	quota, qerr := strconv.ParseFloat(strings.TrimSpace(quotaStr), 64)
+	period, perr := strconv.ParseFloat(strings.TrimSpace(periodStr), 64)
+	if qerr != nil || perr != nil || quota < 0 || period <= 0 {
+		return 0, false
+	}
+	return quota / period, true
+}
+
+func cgroupPathAncestors(path string) []string {
+	path = filepath.Clean(path)
+	ancestors := []string{}
+	for {
+		ancestors = append(ancestors, path)
+		if path == "." || path == "/" {
+			break
+		}
+		path = filepath.Dir(path)
+	}
+	return ancestors
 }
 
 func cpuRangeForCount(count int) string {
@@ -602,27 +671,89 @@ func readCPUInfo(req *domain.HandlerRequest) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	limit := effectiveCPUCount(req)
-	blocks := bytes.Split(bytes.TrimSpace(data), []byte("\n\n"))
-	if limit <= 0 || limit >= len(blocks) {
+	cpuset, ok := readCPUSetFromCgroup(cgroupForReq(req))
+	if !ok || cpuset == "" {
 		return data, nil
+	}
+	return cpuInfoFromHost(data, cpuset, effectiveCPUCount(req)), nil
+}
+
+func cpuInfoFromHost(data []byte, cpuset string, limit int) []byte {
+	blocks := bytes.Split(bytes.TrimSpace(data), []byte("\n\n"))
+	if len(blocks) == 0 {
+		return data
 	}
 
 	out := bytes.Buffer{}
-	for i := 0; i < limit; i++ {
-		if i > 0 {
+	renumbered := 0
+	for _, block := range blocks {
+		lines := bytes.Split(block, []byte("\n"))
+		hostCPU, ok := cpuInfoBlockProcessor(lines)
+		if !ok || !cpuInCPUSet(hostCPU, cpuset) {
+			continue
+		}
+		if limit > 0 && renumbered == limit {
+			break
+		}
+		if out.Len() > 0 {
 			out.WriteString("\n\n")
 		}
-		lines := bytes.Split(blocks[i], []byte("\n"))
 		for j, line := range lines {
 			if bytes.HasPrefix(line, []byte("processor")) {
-				lines[j] = []byte(fmt.Sprintf("processor\t: %d", i))
+				lines[j] = []byte(fmt.Sprintf("processor\t: %d", renumbered))
 			}
 		}
 		out.Write(bytes.Join(lines, []byte("\n")))
+		renumbered++
+	}
+	if out.Len() == 0 {
+		return []byte{}
 	}
 	out.WriteByte('\n')
-	return out.Bytes(), nil
+	return out.Bytes()
+}
+
+func cpuInfoBlockProcessor(lines [][]byte) (int, bool) {
+	for _, line := range lines {
+		if !bytes.HasPrefix(line, []byte("processor")) {
+			continue
+		}
+		parts := bytes.SplitN(line, []byte(":"), 2)
+		if len(parts) != 2 {
+			return 0, false
+		}
+		cpu, err := strconv.Atoi(strings.TrimSpace(string(parts[1])))
+		return cpu, err == nil
+	}
+	return 0, false
+}
+
+func cpuInCPUSet(cpu int, cpuset string) bool {
+	for _, part := range strings.Split(cpuset, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.Contains(part, "-") {
+			bounds := strings.SplitN(part, "-", 2)
+			start, err1 := strconv.Atoi(bounds[0])
+			end, err2 := strconv.Atoi(bounds[1])
+			if err1 == nil && err2 == nil {
+				if start > end {
+					start, end = end, start
+				}
+				if cpu >= start && cpu <= end {
+					return true
+				}
+			}
+			continue
+		}
+		value, err := strconv.Atoi(part)
+		if err == nil && cpu == value {
+			return true
+		}
+	}
+	return false
 }
 
 func readProcStat(req *domain.HandlerRequest) ([]byte, error) {
