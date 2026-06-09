@@ -111,9 +111,9 @@ var (
 	ProcStat_Handler                   = newReadOnlyResource("ProcStat", "/proc/stat", readProcStat)
 	ProcSlabinfo_Handler               = newReadOnlyResource("ProcSlabinfo", "/proc/slabinfo", readSlabinfo)
 	ProcLoadavg_Handler                = newReadOnlyResource("ProcLoadavg", "/proc/loadavg", readLoadavg)
-	ProcPressureIO_Handler             = newReadOnlyResource("ProcPressureIO", "/proc/pressure/io", readPressure("io"))
-	ProcPressureCPU_Handler            = newReadOnlyResource("ProcPressureCPU", "/proc/pressure/cpu", readPressure("cpu"))
-	ProcPressureMemory_Handler         = newReadOnlyResource("ProcPressureMemory", "/proc/pressure/memory", readPressure("memory"))
+	ProcPressureIO_Handler             = newReadOnlyResource("ProcPressureIO", "/proc/pressure/io", readPressure("io", "blkio", "io.pressure"))
+	ProcPressureCPU_Handler            = newReadOnlyResource("ProcPressureCPU", "/proc/pressure/cpu", readPressure("cpu", "cpu", "cpu.pressure"))
+	ProcPressureMemory_Handler         = newReadOnlyResource("ProcPressureMemory", "/proc/pressure/memory", readPressure("memory", "memory", "memory.pressure"))
 	SysDevicesSystemCpuOnline_Handler  = newReadOnlyResource("SysDevicesSystemCpuOnline", "/sys/devices/system/cpu/online", readCPUOnline)
 	SysDevicesSystemCpuPresent_Handler = newReadOnlyResource("SysDevicesSystemCpuPresent", "/sys/devices/system/cpu/present", readCPUPresent)
 )
@@ -471,7 +471,7 @@ func readSlabinfo(req *domain.HandlerRequest) ([]byte, error) {
 	if data, ok := cg.readV1("memory", "memory.kmem.slabinfo"); ok && data != "" {
 		return []byte(ensureTrailingNewline(data)), nil
 	}
-	return []byte("slabinfo - version: 2.1\n# name            <active_objs> <num_objs> <objsize> <objperslab> <pagesperslab> : tunables <limit> <batchcount> <sharedfactor> : slabdata <active_slabs> <num_slabs> <sharedavail>\n"), nil
+	return hostFile("/proc/slabinfo")
 }
 
 func readCPUOnline(req *domain.HandlerRequest) ([]byte, error) {
@@ -1584,10 +1584,13 @@ func minHost(host map[string]uint64, key string, max uint64) uint64 {
 	return v
 }
 
-func readPressure(name string) resourceReader {
+func readPressure(name, controller, cgroupFile string) resourceReader {
 	return func(req *domain.HandlerRequest) ([]byte, error) {
 		cg := cgroupForReq(req)
-		if data, ok := cg.readV2(filepath.Join(name + ".pressure")); ok {
+		if data, ok := cg.readV2(cgroupFile); ok {
+			return []byte(ensureTrailingNewline(data)), nil
+		}
+		if data, ok := cg.readV1(controller, cgroupFile); ok {
 			return []byte(ensureTrailingNewline(data)), nil
 		}
 		return hostFile(filepath.Join("/proc/pressure", name))
