@@ -1702,12 +1702,7 @@ func (s *loadavgSamplerState) refresh(node *loadavgNode) {
 	s.Unlock()
 
 	total, running, lastPID := loadavgStatsForPID(samplePID)
-	if total == 0 {
-		total = 1
-	}
-	if running > total {
-		total = running
-	}
+	total, running = normalizeLoadavgSample(total, running)
 
 	s.Lock()
 	node.avenrun[0] = calcLoadavg(node.avenrun[0], loadavgExp1, uint64(running))
@@ -1733,6 +1728,19 @@ func loadavgStatsForPID(pid int) (int, int, int) {
 		return total, running, lastPID
 	}
 	return visibleProcessStatsFromCgroup(cgroupForPid(uint32(pid)))
+}
+
+func normalizeLoadavgSample(total, running int) (int, int) {
+	if total == 0 {
+		total = 1
+	}
+	if running > total {
+		total = running
+	}
+	if total > 0 && running == 0 {
+		running = 1
+	}
+	return total, running
 }
 
 func calcLoadavg(load, exp, active uint64) uint64 {

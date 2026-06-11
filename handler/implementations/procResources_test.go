@@ -358,6 +358,20 @@ func TestCalcLoadavg(t *testing.T) {
 	}
 }
 
+func TestNormalizeLoadavgSampleKeepsNonEmptyContainerActive(t *testing.T) {
+	total, running := normalizeLoadavgSample(46, 0)
+	if total != 46 || running != 1 {
+		t.Fatalf("normalizeLoadavgSample(46, 0) = (%d, %d), want (46, 1)", total, running)
+	}
+}
+
+func TestNormalizeLoadavgSampleExpandsTotalForRunningTasks(t *testing.T) {
+	total, running := normalizeLoadavgSample(1, 8)
+	if total != 8 || running != 8 {
+		t.Fatalf("normalizeLoadavgSample(1, 8) = (%d, %d), want (8, 8)", total, running)
+	}
+}
+
 func TestLoadavgNodeFormat(t *testing.T) {
 	node := &loadavgNode{
 		avenrun: [3]uint64{loadavgFixed1, loadavgFixed1 / 2, 0},
