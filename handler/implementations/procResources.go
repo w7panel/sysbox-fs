@@ -1737,9 +1737,6 @@ func normalizeLoadavgSample(total, running int) (int, int) {
 	if running > total {
 		total = running
 	}
-	if total > 0 && running == 0 {
-		running = 1
-	}
 	return total, running
 }
 
@@ -1767,9 +1764,6 @@ func (n *loadavgNode) format() string {
 
 	if total == 0 {
 		total = 1
-	}
-	if running == 0 {
-		running = 1
 	}
 	if lastPID == 0 {
 		lastPID = namespacePID(samplePID)
