@@ -1603,13 +1603,14 @@ func readLoadavg(req *domain.HandlerRequest) ([]byte, error) {
 }
 
 type loadavgNode struct {
-	key       string
-	samplePID int
-	avenrun   [3]uint64
-	running   int
-	total     int
-	lastPID   int
-	lastSeen  time.Time
+	key         string
+	samplePID   int
+	avenrun     [3]uint64
+	running     int
+	total       int
+	lastPID     int
+	lastSeen    time.Time
+	lastRefresh time.Time
 }
 
 type loadavgSamplerState struct {
@@ -1634,11 +1635,12 @@ func loadavgSamplerForReq(req *domain.HandlerRequest) *loadavgNode {
 	node := loadavgSampler.nodes[key]
 	if node == nil {
 		node = &loadavgNode{
-			key:       key,
-			samplePID: samplePID,
-			total:     1,
-			lastPID:   namespacePID(samplePID),
-			lastSeen:  now,
+			key:         key,
+			samplePID:   samplePID,
+			total:       1,
+			lastPID:     namespacePID(samplePID),
+			lastSeen:    now,
+			lastRefresh: now,
 		}
 		loadavgSampler.nodes[key] = node
 	} else {
@@ -1647,7 +1649,7 @@ func loadavgSamplerForReq(req *domain.HandlerRequest) *loadavgNode {
 	}
 	loadavgSampler.Unlock()
 
-	loadavgSampler.refresh(node)
+	loadavgSampler.refreshIfDue(node, now)
 	return node
 }
 
@@ -1655,8 +1657,14 @@ func loadavgNodeKey(req *domain.HandlerRequest) (string, int) {
 	pid := int(os.Getpid())
 	if req != nil && req.Pid != 0 {
 		pid = int(req.Pid)
+		if initPID := pidNamespaceInitPID(pid); initPID != 0 {
+			pid = initPID
+		}
 	} else if req != nil && req.Container != nil && req.Container.InitPid() != 0 {
 		pid = int(req.Container.InitPid())
+		if id := req.Container.ID(); id != "" {
+			return "container:" + id, pid
+		}
 	}
 
 	cg := cgroupForPid(uint32(pid))
@@ -1671,6 +1679,35 @@ func loadavgNodeKey(req *domain.HandlerRequest) (string, int) {
 		return "pidns:" + ns, pid
 	}
 	return fmt.Sprintf("pid:%d", pid), pid
+}
+
+func pidNamespaceInitPID(pid int) int {
+	initNS, err := os.Readlink(fmt.Sprintf("/proc/%d/ns/pid", pid))
+	if err != nil {
+		return 0
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		hostPID, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		ns, err := os.Readlink(filepath.Join("/proc", entry.Name(), "ns/pid"))
+		if err != nil || ns != initNS {
+			continue
+		}
+		if namespacePID(hostPID) == 1 {
+			return hostPID
+		}
+	}
+	return 0
 }
 
 func (s *loadavgSamplerState) run() {
@@ -1714,18 +1751,32 @@ func (s *loadavgSamplerState) refresh(node *loadavgNode) {
 	if node.lastPID == 0 {
 		node.lastPID = namespacePID(node.samplePID)
 	}
+	node.lastRefresh = time.Now()
 	s.Unlock()
 }
 
+func (s *loadavgSamplerState) refreshIfDue(node *loadavgNode, now time.Time) {
+	s.Lock()
+	due := now.Sub(node.lastRefresh) >= loadavgSampleInterval
+	s.Unlock()
+	if due {
+		s.refresh(node)
+	}
+}
+
 func loadavgStatsForPID(pid int) (int, int, int) {
-	if total, running, lastPID, ok := cgroupTaskStats(pruneInitScopeCgroup(cgroupForPid(uint32(pid)))); ok {
+	cgTotal, cgRunning, cgLastPID, cgOK := cgroupTaskStats(pruneInitScopeCgroup(cgroupForPid(uint32(pid))))
+	if cgOK && (cgTotal > 1 || cgRunning > 0) {
+		return cgTotal, cgRunning, cgLastPID
+	}
+	if total, running, lastPID, ok := samePIDNamespaceStats(pid); ok && total > cgTotal {
 		return total, running, lastPID
 	}
-	if total, running, lastPID, ok := samePIDNamespaceStats(pid); ok {
+	if total, running, lastPID, ok := containerProcStats(pid); ok && total > cgTotal {
 		return total, running, lastPID
 	}
-	if total, running, lastPID, ok := containerProcStats(pid); ok {
-		return total, running, lastPID
+	if cgOK {
+		return cgTotal, cgRunning, cgLastPID
 	}
 	return visibleProcessStatsFromCgroup(cgroupForPid(uint32(pid)))
 }
