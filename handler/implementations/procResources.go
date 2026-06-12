@@ -1527,7 +1527,7 @@ func swapInfoV1FromLimits(memLimit, memswLimit, usedKB, hostSwapTotalKB, swappin
 		return swapInfo{}, false
 	}
 
-	totalKB := memswLimit / 1024
+	totalKB := (memswLimit - memLimit) / 1024
 	return boundedSwapInfo(totalKB, usedKB, hostSwapTotalKB, swappiness), true
 }
 
@@ -1586,7 +1586,7 @@ func minHost(host map[string]uint64, key string, max uint64) uint64 {
 
 func readPressure(name, controller, cgroupFile string) resourceReader {
 	return func(req *domain.HandlerRequest) ([]byte, error) {
-		cg := cgroupForReq(req)
+		cg := pruneInitScopeCgroup(cgroupForReq(req))
 		if data, ok := cg.readV2(cgroupFile); ok {
 			return []byte(ensureTrailingNewline(data)), nil
 		}
@@ -2171,26 +2171,10 @@ func diskstatsFromIOStat(data string) []byte {
 
 func diskstatsFromIOStatValues(stats map[string]map[string]uint64, devices []diskDevice) []byte {
 	out := bytes.Buffer{}
-	seen := map[string]struct{}{}
 	for _, device := range devices {
 		values := stats[device.key()]
 		if len(values) == 0 {
 			continue
-		}
-		if writeIOStatDiskstatsLine(&out, device, values) {
-			seen[device.key()] = struct{}{}
-		}
-	}
-	for dev, values := range stats {
-		if _, ok := seen[dev]; ok {
-			continue
-		}
-		device, ok := diskDeviceFromKey(dev)
-		if !ok {
-			continue
-		}
-		if device.name == "" {
-			device.name = fmt.Sprintf("dev%d_%d", device.major, device.minor)
 		}
 		writeIOStatDiskstatsLine(&out, device, values)
 	}
@@ -2262,23 +2246,7 @@ func diskstatsFromBlkIO(cg cgroupView) ([]byte, bool) {
 
 func diskstatsFromBlkIOStats(stats blkIOStats, devices []diskDevice) ([]byte, bool) {
 	out := bytes.Buffer{}
-	seen := map[string]struct{}{}
 	for _, device := range devices {
-		if writeBlkIODiskstatsLine(&out, device, stats) {
-			seen[device.key()] = struct{}{}
-		}
-	}
-	for dev := range mergeBlkIODevices(stats) {
-		if _, ok := seen[dev]; ok {
-			continue
-		}
-		device, ok := diskDeviceFromKey(dev)
-		if !ok {
-			continue
-		}
-		if device.name == "" {
-			device.name = fmt.Sprintf("dev%d_%d", device.major, device.minor)
-		}
 		writeBlkIODiskstatsLine(&out, device, stats)
 	}
 	return out.Bytes(), out.Len() > 0
@@ -2338,16 +2306,6 @@ func parseBlkIOValues(data string) map[string]map[string]uint64 {
 		out[fields[0]][fields[1]] = v
 	}
 	return out
-}
-
-func mergeBlkIODevices(stats blkIOStats) map[string]struct{} {
-	devices := map[string]struct{}{}
-	for _, values := range []map[string]map[string]uint64{stats.serviced, stats.merged, stats.serviceBytes, stats.waitTime, stats.serviceTime} {
-		for dev := range values {
-			devices[dev] = struct{}{}
-		}
-	}
-	return devices
 }
 
 func blkIOOp(values map[string]map[string]uint64, dev, op string) uint64 {

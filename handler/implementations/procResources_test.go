@@ -291,6 +291,15 @@ func TestDiskstatsFromIOStat(t *testing.T) {
 	}
 }
 
+func TestDiskstatsFromIOStatSkipsUnknownHostDevices(t *testing.T) {
+	stats := parseIOStatValues("8:1 rbytes=1024 rios=1\n")
+	got := string(diskstatsFromIOStatValues(stats, []diskDevice{{major: 8, minor: 0, name: "sda"}}))
+
+	if got != "" {
+		t.Fatalf("diskstatsFromIOStatValues() = %q, want no synthetic device line", got)
+	}
+}
+
 func TestDiskstatsFromBlkIOStatsUsesDiskstatsOrder(t *testing.T) {
 	stats := blkIOStats{
 		serviced: map[string]map[string]uint64{
@@ -316,6 +325,22 @@ func TestDiskstatsFromBlkIOStatsUsesDiskstatsOrder(t *testing.T) {
 	}
 	if !strings.Contains(lines[0], "8       0 sda") || !strings.Contains(lines[1], "8       16 sdb") {
 		t.Fatalf("diskstatsFromBlkIOStats() = %q, want host diskstats order", got)
+	}
+}
+
+func TestDiskstatsFromBlkIOStatsSkipsUnknownHostDevices(t *testing.T) {
+	stats := blkIOStats{
+		serviced: map[string]map[string]uint64{
+			"8:1": {"Read": 1},
+		},
+		serviceBytes: map[string]map[string]uint64{
+			"8:1": {"Read": 1024},
+		},
+	}
+
+	got, ok := diskstatsFromBlkIOStats(stats, []diskDevice{{major: 8, minor: 0, name: "sda"}})
+	if ok || string(got) != "" {
+		t.Fatalf("diskstatsFromBlkIOStats() = %q, %v; want no synthetic device line", got, ok)
 	}
 }
 
@@ -442,8 +467,8 @@ func TestSwapInfoV1UsesMemswLimit(t *testing.T) {
 	if !ok {
 		t.Fatal("swapInfoV1FromLimits() ok = false, want true")
 	}
-	if info.totalKB != 768 {
-		t.Fatalf("totalKB = %d, want memsw limit 768", info.totalKB)
+	if info.totalKB != 256 {
+		t.Fatalf("totalKB = %d, want swap limit 256", info.totalKB)
 	}
 	if info.usedKB != 64 {
 		t.Fatalf("usedKB = %d, want 64", info.usedKB)
