@@ -51,6 +51,7 @@ var monitoredSyscalls = []string{
 	"reboot",
 	"swapon",
 	"swapoff",
+	"sysinfo",
 	"chown",
 	"fchown",
 	"fchownat",
@@ -518,6 +519,9 @@ func (t *syscallTracer) processSyscall(
 
 	case "swapoff":
 		resp, err = t.processSwapoff(req, fd, cntr)
+
+	case "sysinfo":
+		resp, err = t.processSysinfo(req, fd, cntr)
 
 	case "chown":
 		resp, err = t.processChown(req, fd, cntr)

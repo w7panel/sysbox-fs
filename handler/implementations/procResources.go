@@ -63,6 +63,15 @@ type resourceSnapshot struct {
 	createdAt time.Time
 }
 
+type SysinfoMemory struct {
+	TotalRAM  uint64
+	FreeRAM   uint64
+	SharedRAM uint64
+	BufferRAM uint64
+	TotalSwap uint64
+	FreeSwap  uint64
+}
+
 type procStatState struct {
 	mu          sync.Mutex
 	initialized bool
@@ -1306,6 +1315,46 @@ func readMemInfo(req *domain.HandlerRequest) ([]byte, error) {
 	writeMemLine(&out, "ShmemHugePages", 0)
 	writeMemLine(&out, "ShmemPmdMapped", 0)
 	return out.Bytes(), nil
+}
+
+func SysinfoMemoryForPid(pid uint32) (SysinfoMemory, bool) {
+	host, err := parseHostMeminfo()
+	if err != nil {
+		return SysinfoMemory{}, false
+	}
+
+	cg := cgroupForPid(pid)
+	limit, hasLimit := memoryLimit(cg)
+	usage, hasUsage := memoryUsage(cg)
+	if !hasLimit || limit == 0 || limit > host["MemTotal"]*1024 {
+		return SysinfoMemory{}, false
+	}
+	if !hasUsage {
+		usage = 0
+	}
+
+	totalKB := limit / 1024
+	usedKB := usage / 1024
+	freeKB := uint64(0)
+	if totalKB > usedKB {
+		freeKB = totalKB - usedKB
+	}
+
+	swapTotal, swapUsed := swapValues(cg)
+	swapFree := uint64(0)
+	if swapTotal > swapUsed {
+		swapFree = swapTotal - swapUsed
+	}
+
+	memStat := memoryStatValues(cg)
+	return SysinfoMemory{
+		TotalRAM:  totalKB * 1024,
+		FreeRAM:   freeKB * 1024,
+		SharedRAM: memStat.kbOrHost("shmem", host, "Shmem", usedKB) * 1024,
+		BufferRAM: 0,
+		TotalSwap: swapTotal,
+		FreeSwap:  swapFree,
+	}, true
 }
 
 type memoryStat map[string]uint64
