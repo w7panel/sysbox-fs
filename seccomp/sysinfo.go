@@ -17,6 +17,11 @@
 package seccomp
 
 import (
+	"bytes"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -35,6 +40,9 @@ func (t *syscallTracer) processSysinfo(
 	addr := req.Data.Args[0]
 	if addr == 0 {
 		return t.createErrorResponse(req.ID, syscall.EFAULT), nil
+	}
+	if !shouldVirtualizeSysinfo(req.Pid) {
+		return t.createContinueResponse(req.ID), nil
 	}
 
 	mem, ok := implementations.SysinfoMemoryForPid(req.Pid)
@@ -73,4 +81,48 @@ func (t *syscallTracer) processSysinfo(
 		req.Pid, info.Totalram, info.Freeram, info.Totalswap, info.Freeswap)
 
 	return t.createSuccessResponse(req.ID), nil
+}
+
+func shouldVirtualizeSysinfo(pid uint32) bool {
+	exe, _ := processExe(pid)
+	exeName := filepath.Base(exe)
+	if exeName == "k3s" {
+		return false
+	}
+	if exeName == "busybox" {
+		return true
+	}
+
+	argv0, err := processArgv0(pid)
+	if err == nil && filepath.Base(argv0) == "free" {
+		return true
+	}
+
+	comm, err := processComm(pid)
+	return err == nil && comm == "free"
+}
+
+func processArgv0(pid uint32) (string, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return "", err
+	}
+	if len(data) == 0 {
+		return "", nil
+	}
+
+	arg0, _, _ := bytes.Cut(data, []byte{0})
+	return string(arg0), nil
+}
+
+func processComm(pid uint32) (string, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+func processExe(pid uint32) (string, error) {
+	return os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
 }
