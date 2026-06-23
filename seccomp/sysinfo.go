@@ -32,6 +32,10 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+var sysinfoVirtualizedExeNames = []string{
+	"busybox",
+}
+
 func (t *syscallTracer) processSysinfo(
 	req *sysRequest,
 	fd int32,
@@ -86,10 +90,7 @@ func (t *syscallTracer) processSysinfo(
 func shouldVirtualizeSysinfo(pid uint32) bool {
 	exe, _ := processExe(pid)
 	exeName := filepath.Base(exe)
-	if exeName == "k3s" {
-		return false
-	}
-	if exeName == "busybox" {
+	if isVirtualizedSysinfoExe(exeName) {
 		return true
 	}
 
@@ -100,6 +101,15 @@ func shouldVirtualizeSysinfo(pid uint32) bool {
 
 	comm, err := processComm(pid)
 	return err == nil && comm == "free"
+}
+
+func isVirtualizedSysinfoExe(exeName string) bool {
+	for _, name := range sysinfoVirtualizedExeNames {
+		if exeName == name {
+			return true
+		}
+	}
+	return false
 }
 
 func processArgv0(pid uint32) (string, error) {
