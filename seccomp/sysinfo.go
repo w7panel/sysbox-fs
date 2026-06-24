@@ -17,7 +17,6 @@
 package seccomp
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,18 +31,10 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// Real executable names that should always get the virtualized sysinfo view.
-// "busybox" must stay here because busybox applets run with /proc/<pid>/exe
-// pointing at the busybox binary rather than the applet name.
-var sysinfoVirtualizedExeNames = []string{
-	"busybox",
-}
-
-// Command names that should get the virtualized sysinfo view when they appear
-// as argv[0] or /proc/<pid>/comm. Keep these separate from exe names because
-// applets such as "busybox free" execute the busybox binary while exposing
-// "free" as the command name.
-var sysinfoVirtualizedCommandNames = []string{
+// Process names that should get the virtualized sysinfo view. The names are
+// matched against /proc/<pid>/exe basename and /proc/<pid>/comm only; command
+// arguments are intentionally ignored to avoid accidental matches.
+var sysinfoVirtualizedProcessNames = []string{
 	"free",
 }
 
@@ -101,48 +92,21 @@ func (t *syscallTracer) processSysinfo(
 func shouldVirtualizeSysinfo(pid uint32) bool {
 	exe, _ := processExe(pid)
 	exeName := filepath.Base(exe)
-	if isVirtualizedSysinfoExe(exeName) {
-		return true
-	}
-
-	argv0, err := processArgv0(pid)
-	if err == nil && isVirtualizedSysinfoCommand(filepath.Base(argv0)) {
+	if isVirtualizedSysinfoProcess(exeName) {
 		return true
 	}
 
 	comm, err := processComm(pid)
-	return err == nil && isVirtualizedSysinfoCommand(comm)
+	return err == nil && isVirtualizedSysinfoProcess(comm)
 }
 
-func isVirtualizedSysinfoExe(exeName string) bool {
-	for _, name := range sysinfoVirtualizedExeNames {
-		if exeName == name {
+func isVirtualizedSysinfoProcess(processName string) bool {
+	for _, name := range sysinfoVirtualizedProcessNames {
+		if processName == name {
 			return true
 		}
 	}
 	return false
-}
-
-func isVirtualizedSysinfoCommand(commandName string) bool {
-	for _, name := range sysinfoVirtualizedCommandNames {
-		if commandName == name {
-			return true
-		}
-	}
-	return false
-}
-
-func processArgv0(pid uint32) (string, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err != nil {
-		return "", err
-	}
-	if len(data) == 0 {
-		return "", nil
-	}
-
-	arg0, _, _ := bytes.Cut(data, []byte{0})
-	return string(arg0), nil
 }
 
 func processComm(pid uint32) (string, error) {
