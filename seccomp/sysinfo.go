@@ -32,8 +32,19 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// Real executable names that should always get the virtualized sysinfo view.
+// "busybox" must stay here because busybox applets run with /proc/<pid>/exe
+// pointing at the busybox binary rather than the applet name.
 var sysinfoVirtualizedExeNames = []string{
 	"busybox",
+}
+
+// Command names that should get the virtualized sysinfo view when they appear
+// as argv[0] or /proc/<pid>/comm. Keep these separate from exe names because
+// applets such as "busybox free" execute the busybox binary while exposing
+// "free" as the command name.
+var sysinfoVirtualizedCommandNames = []string{
+	"free",
 }
 
 func (t *syscallTracer) processSysinfo(
@@ -95,17 +106,26 @@ func shouldVirtualizeSysinfo(pid uint32) bool {
 	}
 
 	argv0, err := processArgv0(pid)
-	if err == nil && filepath.Base(argv0) == "free" {
+	if err == nil && isVirtualizedSysinfoCommand(filepath.Base(argv0)) {
 		return true
 	}
 
 	comm, err := processComm(pid)
-	return err == nil && comm == "free"
+	return err == nil && isVirtualizedSysinfoCommand(comm)
 }
 
 func isVirtualizedSysinfoExe(exeName string) bool {
 	for _, name := range sysinfoVirtualizedExeNames {
 		if exeName == name {
+			return true
+		}
+	}
+	return false
+}
+
+func isVirtualizedSysinfoCommand(commandName string) bool {
+	for _, name := range sysinfoVirtualizedCommandNames {
+		if commandName == name {
 			return true
 		}
 	}
