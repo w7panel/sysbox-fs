@@ -448,6 +448,7 @@ func TestNamespacePIDFromStatusUsesInnermostNSpid(t *testing.T) {
 func TestPidNamespaceInitCacheHitAvoidsScan(t *testing.T) {
 	cache := newPidNamespaceInitCache(10)
 	cache.store("pid:[4026531836]", 42)
+	cache.validate = func(ns string, pid int) bool { return true }
 	scans := 0
 
 	got := cache.lookupOrScan("pid:[4026531836]", func(limit int) (int, bool) {
@@ -460,6 +461,25 @@ func TestPidNamespaceInitCacheHitAvoidsScan(t *testing.T) {
 	}
 	if scans != 0 {
 		t.Fatalf("cache hit performed %d scans, want 0", scans)
+	}
+}
+
+func TestPidNamespaceInitCacheRescansStaleHit(t *testing.T) {
+	cache := newPidNamespaceInitCache(10)
+	cache.store("pid:[4026531836]", 42)
+	cache.validate = func(ns string, pid int) bool { return pid == 43 }
+	scans := 0
+
+	got := cache.lookupOrScan("pid:[4026531836]", func(limit int) (int, bool) {
+		scans++
+		return 43, true
+	})
+
+	if got != 43 {
+		t.Fatalf("rescanned init pid = %d, want 43", got)
+	}
+	if scans != 1 {
+		t.Fatalf("stale cache performed %d scans, want 1", scans)
 	}
 }
 

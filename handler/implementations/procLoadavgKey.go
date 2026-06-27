@@ -31,15 +31,17 @@ const loadavgPidNamespaceScanBudget = 4096
 var loadavgPidNamespaceInitCache = newPidNamespaceInitCache(loadavgPidNamespaceScanBudget)
 
 type pidNamespaceInitCache struct {
-	mu     sync.RWMutex
-	limit  int
-	values map[string]int
+	mu       sync.RWMutex
+	limit    int
+	values   map[string]int
+	validate func(string, int) bool
 }
 
 func newPidNamespaceInitCache(limit int) *pidNamespaceInitCache {
 	return &pidNamespaceInitCache{
-		limit:  limit,
-		values: make(map[string]int),
+		limit:    limit,
+		values:   make(map[string]int),
+		validate: pidNamespaceInitCacheEntryValid,
 	}
 }
 
@@ -85,8 +87,11 @@ func (c *pidNamespaceInitCache) lookupOrScan(ns string, scan func(limit int) (in
 	c.mu.RLock()
 	pid, ok := c.values[ns]
 	c.mu.RUnlock()
-	if ok {
+	if ok && c.validate(ns, pid) {
 		return pid
+	}
+	if ok {
+		c.delete(ns)
 	}
 
 	pid, ok = scan(c.limit)
@@ -101,6 +106,20 @@ func (c *pidNamespaceInitCache) store(ns string, pid int) {
 	c.mu.Lock()
 	c.values[ns] = pid
 	c.mu.Unlock()
+}
+
+func (c *pidNamespaceInitCache) delete(ns string) {
+	c.mu.Lock()
+	delete(c.values, ns)
+	c.mu.Unlock()
+}
+
+func pidNamespaceInitCacheEntryValid(ns string, pid int) bool {
+	currentNS, err := os.Readlink(fmt.Sprintf("/proc/%d/ns/pid", pid))
+	if err != nil || currentNS != ns {
+		return false
+	}
+	return namespacePID(pid) == 1
 }
 
 func scanPidNamespaceInitPID(initNS string, limit int) (int, bool) {
