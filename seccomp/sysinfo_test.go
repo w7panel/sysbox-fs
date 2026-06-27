@@ -16,22 +16,44 @@
 
 package seccomp
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestSysinfoVirtualizationCache(t *testing.T) {
 	sysinfoVirtualizationCacheReset()
 
-	if _, ok := sysinfoVirtualizationCacheGet(1234); ok {
+	if _, ok := sysinfoVirtualizationCacheGet(1234, 5678); ok {
 		t.Fatal("unexpected cache hit before value is stored")
 	}
 
-	sysinfoVirtualizationCachePut(1234, true)
+	sysinfoVirtualizationCachePut(1234, 5678, true)
 
-	got, ok := sysinfoVirtualizationCacheGet(1234)
+	got, ok := sysinfoVirtualizationCacheGet(1234, 5678)
 	if !ok {
 		t.Fatal("expected cache hit after value is stored")
 	}
 	if !got {
 		t.Fatal("cached sysinfo virtualization decision = false, want true")
+	}
+
+	if _, ok := sysinfoVirtualizationCacheGet(1234, 5679); ok {
+		t.Fatal("unexpected cache hit for same pid with different start time")
+	}
+}
+
+func TestSysinfoVirtualizationCachePrunesExpiredEntries(t *testing.T) {
+	sysinfoVirtualizationCacheReset()
+
+	sysinfoVirtualizationCache.entries[sysinfoVirtualizationCacheKey{pid: 1234, startTime: 5678}] = sysinfoVirtualizationCacheEntry{
+		virtualized: true,
+		expiresAt:   time.Now().Add(-time.Second),
+	}
+
+	sysinfoVirtualizationCachePut(2234, 6678, false)
+
+	if _, ok := sysinfoVirtualizationCache.entries[sysinfoVirtualizationCacheKey{pid: 1234, startTime: 5678}]; ok {
+		t.Fatal("expired cache entry was not pruned")
 	}
 }

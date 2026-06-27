@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -47,11 +48,16 @@ type sysinfoVirtualizationCacheEntry struct {
 	expiresAt   time.Time
 }
 
+type sysinfoVirtualizationCacheKey struct {
+	pid       uint32
+	startTime uint64
+}
+
 var sysinfoVirtualizationCache = struct {
 	sync.Mutex
-	entries map[uint32]sysinfoVirtualizationCacheEntry
+	entries map[sysinfoVirtualizationCacheKey]sysinfoVirtualizationCacheEntry
 }{
-	entries: map[uint32]sysinfoVirtualizationCacheEntry{},
+	entries: map[sysinfoVirtualizationCacheKey]sysinfoVirtualizationCacheEntry{},
 }
 
 func (t *syscallTracer) processSysinfo(
@@ -106,45 +112,59 @@ func (t *syscallTracer) processSysinfo(
 }
 
 func shouldVirtualizeSysinfo(pid uint32) bool {
-	if virtualized, ok := sysinfoVirtualizationCacheGet(pid); ok {
-		return virtualized
+	startTime, hasStartTime := processStartTime(pid)
+	if hasStartTime {
+		if virtualized, ok := sysinfoVirtualizationCacheGet(pid, startTime); ok {
+			return virtualized
+		}
 	}
 
 	exe, _ := processExe(pid)
 	exeName := filepath.Base(exe)
 	if isVirtualizedSysinfoProcess(exeName) {
-		sysinfoVirtualizationCachePut(pid, true)
+		if hasStartTime {
+			sysinfoVirtualizationCachePut(pid, startTime, true)
+		}
 		return true
 	}
 
 	comm, err := processComm(pid)
 	virtualized := err == nil && isVirtualizedSysinfoProcess(comm)
-	sysinfoVirtualizationCachePut(pid, virtualized)
+	if hasStartTime {
+		sysinfoVirtualizationCachePut(pid, startTime, virtualized)
+	}
 	return virtualized
 }
 
-func sysinfoVirtualizationCacheGet(pid uint32) (bool, bool) {
+func sysinfoVirtualizationCacheGet(pid uint32, startTime uint64) (bool, bool) {
 	sysinfoVirtualizationCache.Lock()
 	defer sysinfoVirtualizationCache.Unlock()
 
-	entry, ok := sysinfoVirtualizationCache.entries[pid]
+	entry, ok := sysinfoVirtualizationCache.entries[sysinfoVirtualizationCacheKey{pid: pid, startTime: startTime}]
 	if !ok {
 		return false, false
 	}
 	if time.Now().After(entry.expiresAt) {
-		delete(sysinfoVirtualizationCache.entries, pid)
+		delete(sysinfoVirtualizationCache.entries, sysinfoVirtualizationCacheKey{pid: pid, startTime: startTime})
 		return false, false
 	}
 	return entry.virtualized, true
 }
 
-func sysinfoVirtualizationCachePut(pid uint32, virtualized bool) {
+func sysinfoVirtualizationCachePut(pid uint32, startTime uint64, virtualized bool) {
 	sysinfoVirtualizationCache.Lock()
 	defer sysinfoVirtualizationCache.Unlock()
 
-	sysinfoVirtualizationCache.entries[pid] = sysinfoVirtualizationCacheEntry{
+	now := time.Now()
+	for key, entry := range sysinfoVirtualizationCache.entries {
+		if now.After(entry.expiresAt) {
+			delete(sysinfoVirtualizationCache.entries, key)
+		}
+	}
+
+	sysinfoVirtualizationCache.entries[sysinfoVirtualizationCacheKey{pid: pid, startTime: startTime}] = sysinfoVirtualizationCacheEntry{
 		virtualized: virtualized,
-		expiresAt:   time.Now().Add(sysinfoVirtualizationCacheTTL),
+		expiresAt:   now.Add(sysinfoVirtualizationCacheTTL),
 	}
 }
 
@@ -152,7 +172,31 @@ func sysinfoVirtualizationCacheReset() {
 	sysinfoVirtualizationCache.Lock()
 	defer sysinfoVirtualizationCache.Unlock()
 
-	sysinfoVirtualizationCache.entries = map[uint32]sysinfoVirtualizationCacheEntry{}
+	sysinfoVirtualizationCache.entries = map[sysinfoVirtualizationCacheKey]sysinfoVirtualizationCacheEntry{}
+}
+
+func processStartTime(pid uint32) (uint64, bool) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, false
+	}
+
+	stat := string(data)
+	commEnd := strings.LastIndex(stat, ")")
+	if commEnd == -1 || commEnd+2 >= len(stat) {
+		return 0, false
+	}
+
+	fields := strings.Fields(stat[commEnd+2:])
+	if len(fields) < 20 {
+		return 0, false
+	}
+
+	startTime, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return startTime, true
 }
 
 func isVirtualizedSysinfoProcess(processName string) bool {
