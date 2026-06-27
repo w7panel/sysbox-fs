@@ -19,6 +19,7 @@ package seccomp
 import (
 	"C"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -443,6 +444,11 @@ func (t *syscallTracer) connHandler(c *net.UnixConn) {
 		// (i.e., ENOENT) to alert of a problem with a specific notification.
 		req, err := libseccomp.NotifReceive(libseccomp.ScmpFd(fd))
 		if err != nil {
+			if isStaleSeccompNotification(err) {
+				logrus.Debugf("Ignoring stale seccomp notification on fd %d, pid %d, cntr %s: %v",
+					fd, pid, formatter.ContainerID{cntrID}, err)
+				continue
+			}
 			logrus.Infof("Unexpected error during NotifReceive() execution (%v) on fd %d, pid %d, cntr %s",
 				err, fd, pid, formatter.ContainerID{cntrID})
 			continue
@@ -455,6 +461,10 @@ func (t *syscallTracer) connHandler(c *net.UnixConn) {
 	t.seccompSessionDelete(session)
 
 	c.Close()
+}
+
+func isStaleSeccompNotification(err error) bool {
+	return errors.Is(err, syscall.ENOENT)
 }
 
 func (t *syscallTracer) process(
@@ -1295,6 +1305,10 @@ func (t *syscallTracer) processOpenat2(
 		resolve = binary.LittleEndian.Uint64(howBytes[16:24])
 	} else {
 		return t.createErrorResponse(req.ID, syscall.EINVAL), nil
+	}
+
+	if canEarlyContinueOpenat2(path, dirfd, resolve) {
+		return t.createContinueResponse(req.ID), nil
 	}
 
 	si := &openat2SyscallInfo{

@@ -21,7 +21,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/nestybox/sysbox-fs/domain"
@@ -36,6 +38,20 @@ import (
 // arguments are intentionally ignored to avoid accidental matches.
 var sysinfoVirtualizedProcessNames = []string{
 	"free",
+}
+
+const sysinfoVirtualizationCacheTTL = 2 * time.Second
+
+type sysinfoVirtualizationCacheEntry struct {
+	virtualized bool
+	expiresAt   time.Time
+}
+
+var sysinfoVirtualizationCache = struct {
+	sync.Mutex
+	entries map[uint32]sysinfoVirtualizationCacheEntry
+}{
+	entries: map[uint32]sysinfoVirtualizationCacheEntry{},
 }
 
 func (t *syscallTracer) processSysinfo(
@@ -90,14 +106,53 @@ func (t *syscallTracer) processSysinfo(
 }
 
 func shouldVirtualizeSysinfo(pid uint32) bool {
+	if virtualized, ok := sysinfoVirtualizationCacheGet(pid); ok {
+		return virtualized
+	}
+
 	exe, _ := processExe(pid)
 	exeName := filepath.Base(exe)
 	if isVirtualizedSysinfoProcess(exeName) {
+		sysinfoVirtualizationCachePut(pid, true)
 		return true
 	}
 
 	comm, err := processComm(pid)
-	return err == nil && isVirtualizedSysinfoProcess(comm)
+	virtualized := err == nil && isVirtualizedSysinfoProcess(comm)
+	sysinfoVirtualizationCachePut(pid, virtualized)
+	return virtualized
+}
+
+func sysinfoVirtualizationCacheGet(pid uint32) (bool, bool) {
+	sysinfoVirtualizationCache.Lock()
+	defer sysinfoVirtualizationCache.Unlock()
+
+	entry, ok := sysinfoVirtualizationCache.entries[pid]
+	if !ok {
+		return false, false
+	}
+	if time.Now().After(entry.expiresAt) {
+		delete(sysinfoVirtualizationCache.entries, pid)
+		return false, false
+	}
+	return entry.virtualized, true
+}
+
+func sysinfoVirtualizationCachePut(pid uint32, virtualized bool) {
+	sysinfoVirtualizationCache.Lock()
+	defer sysinfoVirtualizationCache.Unlock()
+
+	sysinfoVirtualizationCache.entries[pid] = sysinfoVirtualizationCacheEntry{
+		virtualized: virtualized,
+		expiresAt:   time.Now().Add(sysinfoVirtualizationCacheTTL),
+	}
+}
+
+func sysinfoVirtualizationCacheReset() {
+	sysinfoVirtualizationCache.Lock()
+	defer sysinfoVirtualizationCache.Unlock()
+
+	sysinfoVirtualizationCache.entries = map[uint32]sysinfoVirtualizationCacheEntry{}
 }
 
 func isVirtualizedSysinfoProcess(processName string) bool {

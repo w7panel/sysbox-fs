@@ -29,6 +29,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func canEarlyContinueOpenat2(path string, dirfd int32, resolve uint64) bool {
+	if path == "" || !filepath.IsAbs(path) {
+		return false
+	}
+
+	if resolve&RESOLVE_IN_ROOT != 0 {
+		return false
+	}
+
+	return !mount.IsSysboxfsMount(path)
+}
+
 // seccompNotifAddfd matches struct seccomp_notif_addfd from linux/seccomp.h
 type seccompNotifAddfd struct {
 	id          uint64

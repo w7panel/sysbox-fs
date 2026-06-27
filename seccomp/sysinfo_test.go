@@ -16,22 +16,22 @@
 
 package seccomp
 
-import (
-	"errors"
-	"syscall"
-	"testing"
-)
+import "testing"
 
-func TestIsStaleSeccompNotification(t *testing.T) {
-	if !isStaleSeccompNotification(syscall.ENOENT) {
-		t.Fatal("ENOENT notification error should be treated as stale")
+func TestSysinfoVirtualizationCache(t *testing.T) {
+	sysinfoVirtualizationCacheReset()
+
+	if _, ok := sysinfoVirtualizationCacheGet(1234); ok {
+		t.Fatal("unexpected cache hit before value is stored")
 	}
 
-	if !isStaleSeccompNotification(errors.Join(errors.New("wrapped"), syscall.ENOENT)) {
-		t.Fatal("wrapped ENOENT notification error should be treated as stale")
-	}
+	sysinfoVirtualizationCachePut(1234, true)
 
-	if isStaleSeccompNotification(syscall.EPERM) {
-		t.Fatal("EPERM notification error should not be treated as stale")
+	got, ok := sysinfoVirtualizationCacheGet(1234)
+	if !ok {
+		t.Fatal("expected cache hit after value is stored")
+	}
+	if !got {
+		t.Fatal("cached sysinfo virtualization decision = false, want true")
 	}
 }
