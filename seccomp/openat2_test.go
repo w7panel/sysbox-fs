@@ -66,6 +66,20 @@ func TestCanEarlyContinueOpenat2(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "proc self root alias requires full processing",
+			path:    "/proc/self/root/proc/meminfo",
+			dirfd:   unix.AT_FDCWD,
+			resolve: 0,
+			want:    false,
+		},
+		{
+			name:    "proc thread self root alias requires full processing",
+			path:    "/proc/thread-self/root/sys/devices/system/cpu/online",
+			dirfd:   unix.AT_FDCWD,
+			resolve: 0,
+			want:    false,
+		},
+		{
 			name:    "managed sys mount requires full processing",
 			path:    "/sys/devices/system/cpu/online",
 			dirfd:   unix.AT_FDCWD,

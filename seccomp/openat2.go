@@ -38,7 +38,18 @@ func canEarlyContinueOpenat2(path string, dirfd int32, resolve uint64) bool {
 		return false
 	}
 
+	if isProcRootAlias(path) {
+		return false
+	}
+
 	return !mount.IsSysboxfsMount(path)
+}
+
+func isProcRootAlias(path string) bool {
+	return path == "/proc/self/root" ||
+		strings.HasPrefix(path, "/proc/self/root/") ||
+		path == "/proc/thread-self/root" ||
+		strings.HasPrefix(path, "/proc/thread-self/root/")
 }
 
 // seccompNotifAddfd matches struct seccomp_notif_addfd from linux/seccomp.h
