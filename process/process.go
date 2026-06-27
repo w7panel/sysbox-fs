@@ -24,6 +24,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -36,16 +37,63 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// processCacheEntry holds a cached process together with its starttime
+// for PID-reuse detection.
+type processAttrs struct {
+	root     string
+	procroot string
+	cwd      string
+	proccwd  string
+	uid      uint32
+	gid      uint32
+	sgid     []uint32
+}
+
+type processCacheEntry struct {
+	attrs     processAttrs
+	starttime uint64
+}
+
 type processService struct {
-	ios domain.IOServiceIface
+	ios     domain.IOServiceIface
+	cache   map[uint32]*processCacheEntry
+	cacheMu sync.RWMutex
 }
 
 func NewProcessService() domain.ProcessServiceIface {
-	return &processService{}
+	return &processService{
+		cache: make(map[uint32]*processCacheEntry),
+	}
 }
 
 func (ps *processService) Setup(ios domain.IOServiceIface) {
 	ps.ios = ios
+}
+
+// readProcStarttime reads the starttime field (field 22, 1-indexed) from
+// /proc/<pid>/stat. This value is used to detect PID reuse.  Returns 0 if
+// the stat file cannot be read (e.g. process already exited).
+func readProcStarttime(pid uint32) uint64 {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0
+	}
+	// comm (field 2) is in parentheses and may contain ')' chars, so we find
+	// the last ") " to locate the boundary between comm and the remaining fields.
+	// proc(5): fields after ") " are state, ppid, pgrp, session, tty_nr, tpgid,
+	//          flags, minflt, cminflt, majflt, cmajflt, utime, stime, cutime,
+	//          cstime, priority, nice, num_threads, itrealvalue, starttime.
+	// starttime is at index 19 (0-based) from the ") "-split.
+	idx := strings.LastIndex(string(data), ") ")
+	if idx < 0 {
+		return 0
+	}
+	fields := strings.Fields(string(data[idx+2:]))
+	if len(fields) < 20 {
+		return 0
+	}
+	starttime, _ := strconv.ParseUint(fields[19], 10, 64)
+	return starttime
 }
 
 func (ps *processService) ProcessCreate(
@@ -511,16 +559,63 @@ func (p *process) PathAccess(path string, aMode domain.AccessMode, followSymlink
 
 // init() retrieves info about the process to initialize its main attributes.
 func (p *process) init() error {
-
 	if p.initialized {
 		return nil
 	}
 
+	starttime := uint64(0)
+	if p.ps != nil {
+		starttime = readProcStarttime(p.pid)
+	}
+	if starttime != 0 {
+		p.ps.cacheMu.RLock()
+		entry, ok := p.ps.cache[p.pid]
+		p.ps.cacheMu.RUnlock()
+		if ok && entry.starttime == starttime {
+			p.applyAttrs(entry.attrs)
+			return nil
+		}
+	}
+
+	attrs, err := p.loadAttrs()
+	if err != nil {
+		return err
+	}
+
+	if p.cap == nil {
+		if err := p.initCapability(); err != nil {
+			return err
+		}
+	}
+
+	p.applyAttrs(attrs)
+
+	if starttime != 0 {
+		p.ps.cacheMu.Lock()
+		p.ps.cache[p.pid] = &processCacheEntry{attrs: attrs, starttime: starttime}
+		p.ps.cacheMu.Unlock()
+	}
+
+	return nil
+}
+
+func (p *process) applyAttrs(attrs processAttrs) {
+	p.root = attrs.root
+	p.procroot = attrs.procroot
+	p.cwd = attrs.cwd
+	p.proccwd = attrs.proccwd
+	p.uid = attrs.uid
+	p.gid = attrs.gid
+	p.sgid = append(p.sgid[:0], attrs.sgid...)
+	p.initialized = true
+}
+
+func (p *process) loadAttrs() (processAttrs, error) {
 	space := regexp.MustCompile(`\s+`)
 
 	fields := []string{"Uid", "Gid", "Groups"}
 	if err := p.loadStatus(fields); err != nil {
-		return err
+		return processAttrs{}, err
 	}
 
 	// effective uid
@@ -528,11 +623,11 @@ func (p *process) init() error {
 	str = strings.TrimSpace(str)
 	uids := strings.Split(str, " ")
 	if len(uids) != 4 {
-		return fmt.Errorf("invalid uid status: %+v", uids)
+		return processAttrs{}, fmt.Errorf("invalid uid status: %+v", uids)
 	}
 	euid, err := strconv.Atoi(uids[1])
 	if err != nil {
-		return err
+		return processAttrs{}, err
 	}
 
 	// effective gid
@@ -540,11 +635,11 @@ func (p *process) init() error {
 	str = strings.TrimSpace(str)
 	gids := strings.Split(str, " ")
 	if len(gids) != 4 {
-		return fmt.Errorf("invalid gid status: %+v", gids)
+		return processAttrs{}, fmt.Errorf("invalid gid status: %+v", gids)
 	}
 	egid, err := strconv.Atoi(gids[1])
 	if err != nil {
-		return err
+		return processAttrs{}, err
 	}
 
 	// supplementary groups
@@ -558,35 +653,27 @@ func (p *process) init() error {
 		}
 		val, err := strconv.Atoi(g)
 		if err != nil {
-			return err
+			return processAttrs{}, err
 		}
 		sgid = append(sgid, uint32(val))
 	}
 
-	// process root & cwd
 	root := fmt.Sprintf("/proc/%d/root", p.pid)
 	cwd := fmt.Sprintf("/proc/%d/cwd", p.pid)
 
-	// process capabilities
-	if p.cap == nil {
-		if err := p.initCapability(); err != nil {
-			return err
-		}
+	attrs := processAttrs{
+		root:     root,
+		procroot: root,
+		cwd:      cwd,
+		proccwd:  cwd,
+		uid:      uint32(euid),
+		gid:      uint32(egid),
+		sgid:     sgid,
 	}
+	attrs.root, _ = os.Readlink(root)
+	attrs.cwd, _ = os.Readlink(cwd)
 
-	// store all collected attributes
-	p.root, _ = os.Readlink(root)
-	p.cwd, _ = os.Readlink(cwd)
-	p.procroot = root
-	p.proccwd = cwd
-	p.uid = uint32(euid)
-	p.gid = uint32(egid)
-	p.sgid = sgid
-
-	// Mark process as fully initialized.
-	p.initialized = true
-
-	return nil
+	return attrs, nil
 }
 
 // loadStatus loads process status info obtained from the

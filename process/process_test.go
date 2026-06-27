@@ -956,6 +956,87 @@ func TestReplaceProcSelfWithProcPid(t *testing.T) {
 	}
 }
 
+func TestProcessCreateStaysLightweight(t *testing.T) {
+	ps := NewProcessService().(*processService)
+	pid := uint32(os.Getpid())
+
+	p1 := ps.ProcessCreate(pid, 0, 0)
+	p2 := ps.ProcessCreate(pid, 0, 0)
+
+	if p1 == p2 {
+		t.Fatal("ProcessCreate should return a fresh lightweight process wrapper")
+	}
+	if p1.(*process).initialized || p2.(*process).initialized {
+		t.Fatal("ProcessCreate should not initialize process attributes")
+	}
+}
+
+func TestProcessCachePidReuse(t *testing.T) {
+	ps := NewProcessService().(*processService)
+
+	pid := uint32(1<<31 - 1)
+
+	p1 := ps.ProcessCreate(pid, 0, 0)
+	p2 := ps.ProcessCreate(pid, 0, 0)
+	if p1 == p2 {
+		t.Fatal("ProcessCreate should NOT cache a nonexistent PID")
+	}
+}
+
+func TestProcessInitUsesAttributeCache(t *testing.T) {
+	ps := NewProcessService().(*processService)
+	pid := uint32(os.Getpid())
+
+	p1 := ps.ProcessCreate(pid, 0, 0).(*process)
+	p2 := ps.ProcessCreate(pid, 0, 0).(*process)
+
+	if p1 == p2 {
+		t.Fatal("ProcessCreate should not share process wrappers")
+	}
+	if p1.Uid() != p2.Uid() {
+		t.Fatalf("cached uid mismatch: got %d, want %d", p2.Uid(), p1.Uid())
+	}
+	if p1.Root() != p2.Root() {
+		t.Fatalf("cached root mismatch: got %q, want %q", p2.Root(), p1.Root())
+	}
+
+	ps.cacheMu.RLock()
+	entries := len(ps.cache)
+	ps.cacheMu.RUnlock()
+	if entries != 1 {
+		t.Fatalf("cache entries = %d, want 1", entries)
+	}
+}
+
+func TestProcessCreateConcurrent(t *testing.T) {
+	ps := NewProcessService().(*processService)
+	pid := uint32(os.Getpid())
+
+	const goroutines = 10
+	results := make([]domain.ProcessIface, goroutines)
+	done := make(chan struct{}, goroutines)
+
+	for i := range goroutines {
+		go func(idx int) {
+			results[idx] = ps.ProcessCreate(pid, 0, 0)
+			done <- struct{}{}
+		}(i)
+	}
+
+	for range goroutines {
+		<-done
+	}
+
+	for i := range goroutines {
+		if results[i].(*process).initialized {
+			t.Fatalf("ProcessCreate[%d] initialized process attributes", i)
+		}
+	}
+	if results[0].Pid() != pid {
+		t.Fatalf("Pid() = %d, want %d", results[0].Pid(), pid)
+	}
+}
+
 // TODO:
 // Improve PathAccess tests:
 // * test symlink resolution limit
