@@ -141,7 +141,8 @@ type syscallTracer struct {
 	seccompSessionMu   sync.RWMutex                      // seccomp session table lock
 	seccompUnusedNotif bool                              // seccomp-fd unused notification feature supported by kernel
 	seccompNotifPidTrk *seccompNotifPidTracker           // Ensures seccomp notifs for the same pid are processed sequentially (not in parallel).
-	service            *SyscallMonitorService            // backpointer to syscall-monitor service
+	seccompNotifSched  *notifScheduler
+	service            *SyscallMonitorService // backpointer to syscall-monitor service
 }
 
 func getSupportedCompatibleSyscalls(nativeArchId libseccomp.ScmpArch) map[libseccomp.ScmpArch][]string {
@@ -214,6 +215,7 @@ func newSyscallTracer(sms *SyscallMonitorService) *syscallTracer {
 	}
 
 	tracer.seccompNotifPidTrk = newSeccompNotifPidTracker()
+	tracer.seccompNotifSched = newNotifScheduler(maxSeccompNotifInFlight, tracer.seccompNotifPidTrk)
 
 	return tracer
 }
@@ -455,7 +457,7 @@ func (t *syscallTracer) connHandler(c *net.UnixConn) {
 		}
 
 		// Process the incoming syscall and obtain response for seccomp-tracee.
-		go t.process(req, fd, cntrID)
+		t.seccompNotifSched.Schedule(req, fd, cntrID, t.process)
 	}
 
 	t.seccompSessionDelete(session)
@@ -471,11 +473,6 @@ func (t *syscallTracer) process(
 	req *sysRequest,
 	fd int32,
 	cntrID string) {
-
-	// This ensures that for a given pid, we only process one syscall at a time.
-	// Syscalls for different pids are processed in parallel.
-	t.seccompNotifPidTrk.Lock(req.Pid)
-	defer t.seccompNotifPidTrk.Unlock(req.Pid)
 
 	// Process the incoming syscall and obtain response for seccomp-tracee.
 	resp, err := t.processSyscall(req, fd, cntrID)
