@@ -161,7 +161,7 @@ func (si *openat2SyscallInfo) processOpenat2() (*sysResponse, error) {
 
 	// Check if the path is under a sysbox-fs mount
 	if mount.IsSysboxfsMount(fullPath) {
-		logrus.Infof("openat2(): pid: %d: path under sysbox-fs mount detected: path = %s, flags = %#x, mode = %#x, resolve = %#x",
+		logrus.Debugf("openat2(): pid: %d: path under sysbox-fs mount detected: path = %s, flags = %#x, mode = %#x, resolve = %#x",
 			si.pid, fullPath, si.flags, si.mode, si.resolve)
 
 		// Drop some of the RESOLVE_* flags. These flags restrict path resolution in ways that don't work due
@@ -217,7 +217,7 @@ func (si *openat2SyscallInfo) processOpenat2() (*sysResponse, error) {
 		respPayload := responseMsg.Payload.(domain.Openat2RespPayload)
 		fd := respPayload.Fd
 
-		logrus.Infof("openat2(): pid %d: received fd %d from nsenter for path %s", si.pid, fd, fullPath)
+		logrus.Debugf("openat2(): pid %d: received fd %d from nsenter for path %s", si.pid, fd, fullPath)
 
 		// Inject the file descriptor into the traced process using SECCOMP_IOCTL_NOTIF_ADDFD
 		targetFd, err := si.injectFd(fd)
@@ -231,7 +231,7 @@ func (si *openat2SyscallInfo) processOpenat2() (*sysResponse, error) {
 			return resp, nil
 		}
 
-		logrus.Infof("openat2(): pid %d: injected fd %d as %d for path %s", si.pid, fd, targetFd, fullPath)
+		logrus.Debugf("openat2(): pid %d: injected fd %d as %d for path %s", si.pid, fd, targetFd, fullPath)
 
 		// Return success response with the target fd as the return value
 		return t.createSuccessResponseWithRetValue(si.reqId, uint64(targetFd)), nil
