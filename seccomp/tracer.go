@@ -891,6 +891,9 @@ func (t *syscallTracer) processSetxattr(
 	}
 	path := parsedArgs[0]
 	name := parsedArgs[1]
+	if !isAllowedXattr(name) {
+		return t.createContinueResponse(req.ID), nil
+	}
 
 	// Per setxattr(2):
 	// Value is a "void *", not necessarily a string (i.e., it may not be null terminated).
@@ -941,6 +944,9 @@ func (t *syscallTracer) processFsetxattr(
 		return t.createErrorResponse(req.ID, syscall.EPERM), nil
 	}
 	name := parsedArgs[0]
+	if !isAllowedXattr(name) {
+		return t.createContinueResponse(req.ID), nil
+	}
 
 	// Per setxattr(2):
 	// Value is a "void *", not necessarily a string (i.e., it may not be null terminated).

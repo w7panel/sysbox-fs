@@ -42,6 +42,10 @@ var allowedXattrList = []string{
 	"trusted.overlay.opaque",
 }
 
+func isAllowedXattr(name string) bool {
+	return utils.StringSliceContains(allowedXattrList, name)
+}
+
 type setxattrSyscallInfo struct {
 	syscallCtx // syscall generic info
 	pathFd     int32
@@ -109,7 +113,7 @@ func (si *setxattrSyscallInfo) processSetxattr() (*sysResponse, error) {
 
 	t := si.tracer
 
-	if !utils.StringSliceContains(allowedXattrList, si.name) {
+	if !isAllowedXattr(si.name) {
 		return t.createContinueResponse(si.reqId), nil
 	}
 
@@ -186,7 +190,7 @@ func (si *getxattrSyscallInfo) processGetxattr() (*sysResponse, error) {
 
 	t := si.tracer
 
-	if !utils.StringSliceContains(allowedXattrList, si.name) {
+	if !isAllowedXattr(si.name) {
 		return t.createContinueResponse(si.reqId), nil
 	}
 
@@ -286,7 +290,7 @@ func (si *removexattrSyscallInfo) processRemovexattr() (*sysResponse, error) {
 
 	t := si.tracer
 
-	if !utils.StringSliceContains(allowedXattrList, si.name) {
+	if !isAllowedXattr(si.name) {
 		return t.createContinueResponse(si.reqId), nil
 	}
 

@@ -24,7 +24,27 @@ import (
 	"testing"
 
 	unixIpc "github.com/nestybox/sysbox-ipc/unix"
+	libseccomp "github.com/seccomp/libseccomp-golang"
 )
+
+type countingMemParser struct {
+	stringsRead int
+	bytesRead   int
+}
+
+func (mp *countingMemParser) ReadSyscallStringArgs(pid uint32, elems []memParserDataElem) ([]string, error) {
+	mp.stringsRead++
+	return []string{"/tmp/file", "user.unhandled"}, nil
+}
+
+func (mp *countingMemParser) ReadSyscallBytesArgs(pid uint32, elems []memParserDataElem) ([]string, error) {
+	mp.bytesRead++
+	return []string{"ignored-value"}, nil
+}
+
+func (mp *countingMemParser) WriteSyscallBytesArgs(pid uint32, elems []memParserDataElem) error {
+	return nil
+}
 
 func Test_syscallTracer_createErrorResponse(t *testing.T) {
 	type fields struct {
@@ -94,5 +114,35 @@ func TestIsStaleSeccompNotification(t *testing.T) {
 
 	if isStaleSeccompNotification(syscall.EPERM) {
 		t.Fatal("EPERM notification error should not be treated as stale")
+	}
+}
+
+func Test_syscallTracer_processSetxattr_skips_value_read_when_xattr_not_allowed(t *testing.T) {
+	// Given
+	memParser := &countingMemParser{}
+	tracer := &syscallTracer{memParser: memParser}
+	req := &sysRequest{
+		ID:  42,
+		Pid: 1001,
+		Data: libseccomp.ScmpNotifData{
+			Args: []uint64{1, 2, 3, 13, 0},
+		},
+	}
+
+	// When
+	resp, err := tracer.processSetxattr(req, 0, nil, "setxattr")
+
+	// Then
+	if err != nil {
+		t.Fatalf("processSetxattr returned error: %v", err)
+	}
+	if resp == nil || resp.Flags != libseccomp.NotifRespFlagContinue {
+		t.Fatalf("processSetxattr response = %#v, want continue response", resp)
+	}
+	if memParser.stringsRead != 1 {
+		t.Fatalf("string args read count = %d, want 1", memParser.stringsRead)
+	}
+	if memParser.bytesRead != 0 {
+		t.Fatalf("value read count = %d, want 0", memParser.bytesRead)
 	}
 }
