@@ -64,13 +64,17 @@ func TestMain(m *testing.M) {
 	css.Setup(nil, prs, ios, mts)
 	mts.Setup(css, hds, prs, nss)
 
-	// HandlerService's common mocking instructions.
-	hds.On("NSenterService").Return(nss)
-	hds.On("ProcessService").Return(prs)
-	hds.On("DirHandlerEntries", "/proc/sys/net").Return(nil)
+	setupHandlerServiceMock()
 
 	// Run test-suite.
 	m.Run()
+}
+
+func setupHandlerServiceMock() {
+	hds.ExpectedCalls = nil
+	hds.On("NSenterService").Return(nss)
+	hds.On("ProcessService").Return(prs)
+	hds.On("DirHandlerEntries", "/proc/sys/net").Return(nil)
 }
 
 func TestPassThrough_Lookup(t *testing.T) {
@@ -218,6 +222,8 @@ func TestPassThrough_Lookup(t *testing.T) {
 	//
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			setupHandlerServiceMock()
+
 			h := &implementations.PassThrough{
 				domain.HandlerBase{
 					Name:    tt.fields.Name,
@@ -408,6 +414,8 @@ func TestPassThrough_Open(t *testing.T) {
 	//
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			setupHandlerServiceMock()
+
 			h := &implementations.PassThrough{
 				domain.HandlerBase{
 					Name:    tt.fields.Name,
@@ -549,6 +557,8 @@ func TestPassThrough_Read(t *testing.T) {
 	//
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			setupHandlerServiceMock()
+
 			h := &implementations.PassThrough{
 				domain.HandlerBase{
 					Name:    tt.fields.Name,
@@ -746,6 +756,8 @@ func TestPassThrough_Write(t *testing.T) {
 	//
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			setupHandlerServiceMock()
+
 			h := &implementations.PassThrough{
 				domain.HandlerBase{
 					Name:    tt.fields.Name,
@@ -955,6 +967,8 @@ func TestPassThrough_ReadDirAll(t *testing.T) {
 	//
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			setupHandlerServiceMock()
+
 			h := &implementations.PassThrough{
 				domain.HandlerBase{
 					Name:    tt.fields.Name,

@@ -14,6 +14,8 @@ import (
 
 func TestPassThrough_ReadWithNS_does_not_hold_container_lock_during_cache_miss_fetch(t *testing.T) {
 	// Given
+	setupHandlerServiceMock()
+
 	h := &implementations.PassThrough{
 		domain.HandlerBase{
 			Name:    "PassThrough",
@@ -131,6 +133,8 @@ func TestPassThrough_ReadWithNS_does_not_hold_container_lock_during_cache_miss_f
 
 func TestPassThrough_ReadWithNS_coalesces_concurrent_cache_miss_fetches(t *testing.T) {
 	// Given
+	setupHandlerServiceMock()
+
 	h := &implementations.PassThrough{
 		domain.HandlerBase{
 			Name:    "PassThrough",
