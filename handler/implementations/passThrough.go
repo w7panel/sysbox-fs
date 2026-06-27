@@ -226,38 +226,18 @@ func (h *PassThrough) ReadWithNS(
 	if domain.ProcessNsMatch(process, cntr.InitProc()) {
 
 		cntr.Lock()
-
-		// Check the data cache
 		sz, err = cntr.Data(path, req.Offset, &req.Data)
+		cntr.Unlock()
 		if err != nil && err != io.EOF {
-			cntr.Unlock()
 			return 0, fuse.IOerror{Code: syscall.EINVAL}
 		}
 
 		if req.Offset == 0 && sz == 0 && err == io.EOF {
-
-			// Resource is not cached, read it from the filesystem.
-			sz, err = h.fetchFile(process, namespaces, n, req.Offset, &req.Data)
+			sz, err = h.readCacheMiss(cntr, process, namespaces, n, req)
 			if err != nil {
-				cntr.Unlock()
-				return 0, fuse.IOerror{Code: syscall.EINVAL}
-			}
-
-			if sz == 0 {
-				cntr.Unlock()
-				return 0, nil
-			}
-
-			if !req.NoCache {
-				err = cntr.SetData(path, req.Offset, req.Data)
-				if err != nil {
-					cntr.Unlock()
-					return 0, fuse.IOerror{Code: syscall.EINVAL}
-				}
+				return 0, err
 			}
 		}
-
-		cntr.Unlock()
 
 	} else {
 		sz, err = h.fetchFile(process, namespaces, n, req.Offset, &req.Data)
