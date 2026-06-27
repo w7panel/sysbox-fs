@@ -174,6 +174,11 @@ func (h *readOnlyResource) snapshotData(req *domain.HandlerRequest) ([]byte, err
 	now := time.Now()
 
 	h.mu.Lock()
+	protectedKey := ""
+	if req.Offset > 0 {
+		protectedKey = key
+	}
+	h.pruneExpiredSnapshots(now, protectedKey)
 	if snapshot, ok := h.snapshots[key]; ok && (req.Offset > 0 || now.Sub(snapshot.createdAt) < resourceSnapshotTTL) {
 		data := snapshot.data
 		h.mu.Unlock()
@@ -194,6 +199,17 @@ func (h *readOnlyResource) snapshotData(req *domain.HandlerRequest) ([]byte, err
 	h.mu.Unlock()
 
 	return data, nil
+}
+
+func (h *readOnlyResource) pruneExpiredSnapshots(now time.Time, protectedKey string) {
+	for key, snapshot := range h.snapshots {
+		if key == protectedKey {
+			continue
+		}
+		if now.Sub(snapshot.createdAt) >= resourceSnapshotTTL {
+			delete(h.snapshots, key)
+		}
+	}
 }
 
 func (h *readOnlyResource) snapshotKey(req *domain.HandlerRequest) string {

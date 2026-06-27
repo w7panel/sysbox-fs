@@ -228,6 +228,11 @@ func procUptimeData(req *domain.HandlerRequest, ctime, now time.Time) []byte {
 
 	procUptimeSnapshots.Lock()
 	defer procUptimeSnapshots.Unlock()
+	protectedKey := ""
+	if req.Offset > 0 {
+		protectedKey = key
+	}
+	pruneExpiredProcUptimeSnapshots(now, protectedKey)
 
 	snapshot, ok := procUptimeSnapshots.entries[key]
 	if ok && (req.Offset > 0 || now.Sub(snapshot.createdAt) < procUptimeSnapshotTTL) {
@@ -242,6 +247,17 @@ func procUptimeData(req *domain.HandlerRequest, ctime, now time.Time) []byte {
 		createdAt: now,
 	}
 	return data
+}
+
+func pruneExpiredProcUptimeSnapshots(now time.Time, protectedKey string) {
+	for key, snapshot := range procUptimeSnapshots.entries {
+		if key == protectedKey {
+			continue
+		}
+		if now.Sub(snapshot.createdAt) >= procUptimeSnapshotTTL {
+			delete(procUptimeSnapshots.entries, key)
+		}
+	}
 }
 
 func procUptimeSnapshotKey(req *domain.HandlerRequest) string {
