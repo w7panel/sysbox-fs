@@ -573,6 +573,11 @@ func (p *process) init() error {
 		p.ps.cacheMu.RUnlock()
 		if ok && entry.starttime == starttime {
 			p.applyAttrs(entry.attrs)
+			if p.cap == nil {
+				if err := p.initCapability(); err != nil {
+					return err
+				}
+			}
 			return nil
 		}
 	}

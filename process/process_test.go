@@ -1008,6 +1008,21 @@ func TestProcessInitUsesAttributeCache(t *testing.T) {
 	}
 }
 
+func TestProcessInitCacheHitInitializesCapabilities(t *testing.T) {
+	ps := NewProcessService().(*processService)
+	pid := uint32(os.Getpid())
+
+	p1 := ps.ProcessCreate(pid, 0, 0).(*process)
+	p2 := ps.ProcessCreate(pid, 0, 0).(*process)
+
+	_ = p1.Uid()
+	_ = p2.Uid()
+
+	if p2.cap == nil {
+		t.Fatal("cached process init should initialize capabilities")
+	}
+}
+
 func TestProcessCreateConcurrent(t *testing.T) {
 	ps := NewProcessService().(*processService)
 	pid := uint32(os.Getpid())
