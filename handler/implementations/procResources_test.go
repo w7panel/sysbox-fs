@@ -445,6 +445,41 @@ func TestNamespacePIDFromStatusUsesInnermostNSpid(t *testing.T) {
 	}
 }
 
+func TestPidNamespaceInitCacheHitAvoidsScan(t *testing.T) {
+	cache := newPidNamespaceInitCache(10)
+	cache.store("pid:[4026531836]", 42)
+	scans := 0
+
+	got := cache.lookupOrScan("pid:[4026531836]", func(limit int) (int, bool) {
+		scans++
+		return 0, false
+	})
+
+	if got != 42 {
+		t.Fatalf("cached init pid = %d, want 42", got)
+	}
+	if scans != 0 {
+		t.Fatalf("cache hit performed %d scans, want 0", scans)
+	}
+}
+
+func TestPidNamespaceInitCachePassesScanBudget(t *testing.T) {
+	cache := newPidNamespaceInitCache(7)
+	seenLimit := 0
+
+	got := cache.lookupOrScan("pid:[4026531837]", func(limit int) (int, bool) {
+		seenLimit = limit
+		return 43, true
+	})
+
+	if got != 43 {
+		t.Fatalf("scanned init pid = %d, want 43", got)
+	}
+	if seenLimit != 7 {
+		t.Fatalf("scan limit = %d, want 7", seenLimit)
+	}
+}
+
 func TestPruneInitScopePath(t *testing.T) {
 	tests := map[string]string{
 		"/init.scope":                        "/",
