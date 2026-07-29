@@ -74,6 +74,14 @@ type ProcessServiceIface interface {
 
 // ProcessNsMatch returns true if the given processes are in the same namespaces.
 func ProcessNsMatch(p1, p2 ProcessIface) bool {
+	// During OCI container initialization, sysctls may be written through
+	// sysbox-fs before the container init process has been recorded. Treat that
+	// state as a namespace mismatch; dereferencing the missing process causes the
+	// FUSE handler to panic and makes runc report the sysctl write as EIO.
+	if p1 == nil || p2 == nil {
+		return false
+	}
+
 	p1Inodes, p1Err := p1.NsInodes()
 	p2Inodes, p2Err := p2.NsInodes()
 
