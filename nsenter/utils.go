@@ -19,10 +19,21 @@ package nsenter
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/sys/unix"
 )
+
+const payloadMountDir = "/dev"
+
+func createPayloadMountpoint(prefix string) (string, error) {
+	return os.MkdirTemp(payloadMountDir, prefix)
+}
+
+func isPayloadMountpoint(path, prefix string) bool {
+	return strings.HasPrefix(path, filepath.Join(payloadMountDir, prefix))
+}
 
 type payloadMountsInfo struct {
 	sysfsMountpoint  string
@@ -64,8 +75,9 @@ func processPayloadMounts(mountSysfs, mountProcfs bool) (*payloadMountsInfo, err
 	// possible for the nsenter process to mount procfs on top of the container's
 	// /proc, turns out it's not possible to mount sysfs on top of the
 	// container's /sys (the kernel returns a "resource busy" error). Thus, we
-	// mount sysfs on a temporary ephemeral dir inside the container, at
-	// /.sysbox-sysfs-<random-id>. Note that while that directory is visible
+	// mount sysfs on a temporary ephemeral dir inside the container's /dev
+	// tmpfs, at /dev/.sysbox-sysfs-<random-id>. Note that while that directory
+	// is visible
 	// inside the container (for a very brief period of time while the nsenter
 	// agent does its thing), the container can't see the sysfs mount on that dir
 	// (only the nsenter process can see the mount because it operates in a
@@ -74,7 +86,7 @@ func processPayloadMounts(mountSysfs, mountProcfs bool) (*payloadMountsInfo, err
 	// container processes.
 	if mountSysfs {
 
-		sysfsMountpoint, err = os.MkdirTemp("/", ".sysbox-sysfs-")
+		sysfsMountpoint, err = createPayloadMountpoint(".sysbox-sysfs-")
 		if errors.Is(err, unix.EROFS) {
 			// @ctalledo: hack: if the container has a read-only filesystem, then
 			// we can't create the temporary sysfs mount dir on it. In this case we
@@ -96,14 +108,14 @@ func processPayloadMounts(mountSysfs, mountProcfs bool) (*payloadMountsInfo, err
 	cleanupSysfs := func(mountpoint string) {
 		if mountpoint != "" {
 			unix.Unmount(mountpoint, unix.MNT_DETACH)
-			if strings.HasPrefix(mountpoint, "/.sysbox-sysfs-") {
+			if isPayloadMountpoint(mountpoint, ".sysbox-sysfs-") {
 				os.RemoveAll(mountpoint)
 			}
 		}
 	}
 
 	if mountProcfs {
-		procfsMountpoint, err = os.MkdirTemp("/", ".sysbox-procfs-")
+		procfsMountpoint, err = createPayloadMountpoint(".sysbox-procfs-")
 		if errors.Is(err, unix.EROFS) {
 			// @ctalledo: hack: if the container has a read-only filesystem, then
 			// we can't create the temporary procfs mount dir on it. In this case we
@@ -125,7 +137,7 @@ func processPayloadMounts(mountSysfs, mountProcfs bool) (*payloadMountsInfo, err
 	cleanupProcfs := func(mountpoint string) {
 		if mountpoint != "" {
 			unix.Unmount(mountpoint, unix.MNT_DETACH)
-			if strings.HasPrefix(mountpoint, "/.sysbox-procfs-") {
+			if isPayloadMountpoint(mountpoint, ".sysbox-procfs-") {
 				os.RemoveAll(mountpoint)
 			}
 		}
