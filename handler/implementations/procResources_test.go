@@ -213,6 +213,15 @@ func TestWriteProcStatCPULine(t *testing.T) {
 	}
 }
 
+func TestWriteProcStatNonCPULinesPreservesHostBtime(t *testing.T) {
+	out := bytes.Buffer{}
+	writeProcStatNonCPULines(&out, []string{"cpu 1 2 3 4", "cpu0 1 2 3 4", "btime 123", "processes 4"})
+
+	if got, want := out.String(), "btime 123\nprocesses 4\n"; got != want {
+		t.Fatalf("writeProcStatNonCPULines() = %q, want %q", got, want)
+	}
+}
+
 func TestCPURangeForCount(t *testing.T) {
 	cases := []struct {
 		count int

@@ -801,18 +801,18 @@ func readProcStat(req *domain.HandlerRequest) ([]byte, error) {
 		writeProcStatCPULine(&out, fmt.Sprintf("cpu%d", i), cpu)
 	}
 
+	writeProcStatNonCPULines(&out, lines)
+	return out.Bytes(), nil
+}
+
+func writeProcStatNonCPULines(out *bytes.Buffer, lines []string) {
 	for _, line := range lines {
 		if strings.HasPrefix(line, "cpu") {
-			continue
-		}
-		if strings.HasPrefix(line, "btime ") && req.Container != nil {
-			out.WriteString(fmt.Sprintf("btime %d\n", req.Container.Ctime().Unix()))
 			continue
 		}
 		out.WriteString(line)
 		out.WriteByte('\n')
 	}
-	return out.Bytes(), nil
 }
 
 func procStatCPUTicks(req *domain.HandlerRequest, cpus int, fieldCount int, now time.Time) []uint64 {
