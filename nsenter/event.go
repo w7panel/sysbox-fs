@@ -588,6 +588,15 @@ func (e *NSenterEvent) SendRequest() error {
 		}
 	}()
 
+	// nsexec reports bootstrap failures through _LIBCONTAINER_LOGPIPE. Keep
+	// that stream separate from the request socket so that a child failure
+	// before it returns its pid is actionable rather than an opaque EOF.
+	logParent, logChild, err := os.Pipe()
+	if err != nil {
+		return fmt.Errorf("creating nsenter log pipe: %w", err)
+	}
+	defer logParent.Close()
+
 	// Set the SO_PASSCRED on the socket (so we can pass process credentials across it)
 	socket := int(parentPipe.Fd())
 	err = syscall.SetsockoptInt(socket, syscall.SOL_SOCKET, syscall.SO_PASSCRED, 1)
@@ -615,8 +624,8 @@ func (e *NSenterEvent) SendRequest() error {
 	cmd := &exec.Cmd{
 		Path:        "/proc/self/exe",
 		Args:        []string{os.Args[0], "nsenter"},
-		ExtraFiles:  []*os.File{childPipe},
-		Env:         []string{"_LIBCONTAINER_INITPIPE=3", fmt.Sprintf("GOMAXPROCS=%s", os.Getenv("GOMAXPROCS"))},
+		ExtraFiles:  []*os.File{childPipe, logChild},
+		Env:         []string{"_LIBCONTAINER_INITPIPE=3", "_LIBCONTAINER_LOGPIPE=4", fmt.Sprintf("GOMAXPROCS=%s", os.Getenv("GOMAXPROCS"))},
 		SysProcAttr: &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM},
 		Stdin:       nil,
 		Stdout:      nil,
@@ -626,6 +635,7 @@ func (e *NSenterEvent) SendRequest() error {
 	// Launch sysbox-fs' first child process.
 	err = cmd.Start()
 	childPipe.Close()
+	logChild.Close()
 	if err != nil {
 		logrus.Errorf("Error launching sysbox-fs first child process: %s", err)
 		return errors.New("Error launching sysbox-fs first child process")
@@ -647,7 +657,15 @@ func (e *NSenterEvent) SendRequest() error {
 	var pid pid
 	decoder := json.NewDecoder(e.parentPipe)
 	if err := decoder.Decode(&pid); err != nil {
-		logrus.Warnf("Error receiving first-child pid: %s", err)
+		var detail string
+		if logData, logErr := io.ReadAll(logParent); logErr == nil {
+			detail = strings.TrimSpace(string(logData))
+		}
+		if detail != "" {
+			logrus.Warnf("Error receiving first-child pid: %s (nsexec: %s)", err, detail)
+		} else {
+			logrus.Warnf("Error receiving first-child pid: %s", err)
+		}
 		if !e.Async {
 			e.reaper.nsenterReapReq()
 		}
@@ -1128,6 +1146,8 @@ func (e *NSenterEvent) processMountSyscallRequest() error {
 	}
 
 	if err != nil {
+		logrus.Debugf("nsenter mount failed: source=%s target=%s fstype=%s flags=%#x: %v",
+			payload[i].Source, payload[i].Target, payload[i].FsType, payload[i].Flags, err)
 		// Unmount previously executed mount instructions (unless it's a remount).
 		//
 		// TODO: ideally we would revert remounts too, but to do this we need information

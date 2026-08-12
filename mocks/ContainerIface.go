@@ -259,6 +259,11 @@ func (_m *ContainerIface) Lock() {
 	_m.Called()
 }
 
+func (_m *ContainerIface) MappingMode() uint32 {
+	ret := _m.Called()
+	return ret.Get(0).(uint32)
+}
+
 // ProcMaskPaths provides a mock function with given fields:
 func (_m *ContainerIface) ProcMaskPaths() []string {
 	ret := _m.Called()
@@ -308,6 +313,10 @@ func (_m *ContainerIface) SetInitProc(pid uint32, uid uint32, gid uint32) error 
 	}
 
 	return r0
+}
+
+func (_m *ContainerIface) SetMappingMode(mode uint32) {
+	_m.Called(mode)
 }
 
 // UID provides a mock function with given fields:

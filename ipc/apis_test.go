@@ -225,7 +225,11 @@ func TestContainerRegister(t *testing.T) {
 	var a1 = args{
 		ctx: ctx,
 		data: &grpc.ContainerData{
-			Id: "c1",
+			Id:       "c1",
+			UidFirst: 1,
+			UidSize:  65536,
+			GidFirst: 1,
+			GidSize:  65536,
 		},
 	}
 

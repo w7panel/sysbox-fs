@@ -426,11 +426,12 @@ func (u *umountSyscallInfo) processUmount(
 
 	// Create nsenter-event envelope.
 	nss := u.tracer.service.nss
+	namespaces := u.nsenterNamespaces()
 	event := nss.NewEvent(
 		u.pid,
 		u.uid,
 		u.gid,
-		&domain.AllNSs,
+		namespaces,
 		0,
 		&domain.NSenterMessage{
 			Type:    domain.UmountSyscallRequest,

@@ -36,6 +36,7 @@ type ContainerIface interface {
 	GID() uint32
 	UidSize() uint32
 	GidSize() uint32
+	MappingMode() uint32
 	ProcRoPaths() []string
 	ProcMaskPaths() []string
 	InitProc() ProcessIface
@@ -60,6 +61,7 @@ type ContainerIface interface {
 	SetData(name string, offset int64, data []byte) error
 	SetInitProc(pid, uid, gid uint32) error
 	SetRegistrationCompleted()
+	SetMappingMode(uint32)
 	//
 	// Locks for read-modify-write operations on container data via the Data()
 	// and SetData() methods.

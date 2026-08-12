@@ -21,6 +21,7 @@ import (
 
 	"github.com/nestybox/sysbox-fs/domain"
 	grpc "github.com/nestybox/sysbox-ipc/sysboxFsGrpc"
+	ipcLib "github.com/nestybox/sysbox-ipc/sysboxMgrLib"
 	grpcCodes "google.golang.org/grpc/codes"
 	grpcStatus "google.golang.org/grpc/status"
 )
@@ -66,6 +67,9 @@ func (ips *ipcService) Init() error {
 }
 
 func ContainerPreRegister(ctx interface{}, data *grpc.ContainerData) error {
+	if !ipcLib.MappingMode(data.MappingMode).Valid() {
+		return grpcStatus.Error(grpcCodes.InvalidArgument, "invalid mapping mode")
+	}
 
 	ipcService := ctx.(*ipcService)
 
@@ -78,6 +82,17 @@ func ContainerPreRegister(ctx interface{}, data *grpc.ContainerData) error {
 }
 
 func ContainerRegister(ctx interface{}, data *grpc.ContainerData) error {
+	mode := ipcLib.MappingMode(data.MappingMode)
+	if !mode.Valid() {
+		return grpcStatus.Error(grpcCodes.InvalidArgument, "invalid mapping mode")
+	}
+	if mode == ipcLib.NestedIdentity {
+		if data.UidFirst != 0 || data.GidFirst != 0 || data.UidSize != 65536 || data.GidSize != 65536 {
+			return grpcStatus.Error(grpcCodes.InvalidArgument, "nested-identity requires uid/gid mapping 0:0:65536")
+		}
+	} else if data.UidFirst == 0 || data.GidFirst == 0 {
+		return grpcStatus.Error(grpcCodes.InvalidArgument, "standard-subid does not allow uid/gid 0")
+	}
 
 	ipcService := ctx.(*ipcService)
 
@@ -95,6 +110,9 @@ func ContainerRegister(ctx interface{}, data *grpc.ContainerData) error {
 		data.ProcMaskPaths,
 		ipcService.css,
 	)
+	if cntr != nil {
+		cntr.SetMappingMode(data.MappingMode)
+	}
 
 	err := ipcService.css.ContainerRegister(cntr)
 	if err != nil {
@@ -144,6 +162,9 @@ func ContainerUpdate(ctx interface{}, data *grpc.ContainerData) error {
 		nil,
 		ipcService.css,
 	)
+	if cntr != nil {
+		cntr.SetMappingMode(data.MappingMode)
+	}
 
 	err := ipcService.css.ContainerUpdate(cntr)
 	if err != nil {

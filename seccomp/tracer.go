@@ -382,6 +382,16 @@ func (t *syscallTracer) connHandler(c *net.UnixConn) {
 	if err != nil {
 		return
 	}
+	cntr := t.service.css.ContainerLookupById(cntrID)
+	if cntr == nil || !cntr.IsRegistrationCompleted() {
+		logrus.Warnf("Rejected seccomp session for unregistered container %s", formatter.ContainerID{cntrID})
+		return
+	}
+	process := t.service.prs.ProcessCreate(uint32(pid), 0, 0)
+	if process.RootInode() == 0 || process.RootInode() != cntr.InitProc().RootInode() {
+		logrus.Warnf("Rejected seccomp session for pid %d outside container %s", pid, formatter.ContainerID{cntrID})
+		return
+	}
 
 	// Send Ack message back to sysbox-runc.
 	if err = unixIpc.SendSeccompInitAckMsg(c); err != nil {
@@ -640,8 +650,19 @@ func (t *syscallTracer) processMount(
 
 	process := t.service.prs.ProcessCreate(req.Pid, 0, 0)
 
+	// A nested Sysbox (L2) process mounts procfs/sysfs from a child user
+	// namespace. The nsenter helper runs as host root (kuid 0), which that
+	// userns maps to the overflow uid, so it cannot mount the L2-owned mount
+	// namespace on the caller's behalf. The caller itself has CAP_SYS_ADMIN
+	// in the child userns, so let the kernel execute the mount directly.
+	if isChildUsernsSpecialMount(process, cntr, fstype) {
+		logrus.Debugf("child userns %s mount at %s: letting kernel execute directly", fstype, target)
+		return t.createContinueResponse(req.ID), nil
+	}
+
 	// cap_sys_admin capability is required for mount operations.
 	if !process.IsSysAdminCapabilitySet() {
+		logrus.Debugf("mount request from pid %d (%s %s) rejected: no CAP_SYS_ADMIN", req.Pid, fstype, target)
 		return t.createErrorResponse(req.ID, syscall.EPERM), nil
 	}
 

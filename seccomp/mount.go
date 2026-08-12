@@ -166,11 +166,12 @@ func (m *mountSyscallInfo) processProcMount(
 
 	// Create nsenter-event envelope.
 	nss := m.tracer.service.nss
+	namespaces := m.nsenterNamespaces()
 	event := nss.NewEvent(
 		m.syscallCtx.pid,
 		m.syscallCtx.uid,
 		m.syscallCtx.gid,
-		&domain.AllNSs,
+		namespaces,
 		0,
 		&domain.NSenterMessage{
 			Type:    domain.MountSyscallRequest,
@@ -189,9 +190,11 @@ func (m *mountSyscallInfo) processProcMount(
 	// Obtain nsenter-event response.
 	responseMsg := nss.ReceiveResponseEvent(event)
 	if responseMsg.Type == domain.ErrorResponse {
+		err := responseMsg.Payload.(fuse.IOerror)
+		logrus.Debugf("proc mount helper failed: %s", err.Message)
 		resp := m.tracer.createErrorResponse(
 			m.reqId,
-			responseMsg.Payload.(fuse.IOerror).Code)
+			err.Code)
 		return resp, nil
 	}
 
@@ -345,11 +348,12 @@ func (m *mountSyscallInfo) processSysMount(
 
 	// Create nsenter-event envelope.
 	nss := m.tracer.service.nss
+	namespaces := m.nsenterNamespaces()
 	event := nss.NewEvent(
 		m.syscallCtx.pid,
 		m.syscallCtx.uid,
 		m.syscallCtx.gid,
-		&domain.AllNSs,
+		namespaces,
 		0,
 		&domain.NSenterMessage{
 			Type:    domain.MountSyscallRequest,
@@ -368,9 +372,11 @@ func (m *mountSyscallInfo) processSysMount(
 	// Obtain nsenter-event response.
 	responseMsg := nss.ReceiveResponseEvent(event)
 	if responseMsg.Type == domain.ErrorResponse {
+		err := responseMsg.Payload.(fuse.IOerror)
+		logrus.Debugf("sysfs mount helper failed: %s", err.Message)
 		resp := m.tracer.createErrorResponse(
 			m.reqId,
-			responseMsg.Payload.(fuse.IOerror).Code)
+			err.Code)
 		return resp, nil
 	}
 
@@ -1002,11 +1008,12 @@ func (m *mountSyscallInfo) processBindMount(
 
 	// Create nsenter-event envelope.
 	nss := m.tracer.service.nss
+	namespaces := m.nsenterNamespaces()
 	event := nss.NewEvent(
 		m.syscallCtx.pid,
 		m.syscallCtx.uid,
 		m.syscallCtx.gid,
-		&domain.AllNSs,
+		namespaces,
 		0,
 		&domain.NSenterMessage{
 			Type:    domain.MountSyscallRequest,

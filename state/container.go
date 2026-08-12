@@ -40,6 +40,7 @@ type container struct {
 	uidSize         uint32                      // Uid range size
 	gidFirst        uint32                      // first value of Gid range (host side)
 	gidSize         uint32                      // Gid range size
+	mappingMode     uint32                      // explicit user-namespace mapping mode
 	regCompleted    bool                        // registration completion flag
 	procRoPaths     []string                    // OCI spec read-only proc paths
 	procMaskPaths   []string                    // OCI spec masked proc paths
@@ -140,6 +141,13 @@ func (c *container) GidSize() uint32 {
 	defer c.intLock.RUnlock()
 
 	return c.gidSize
+}
+
+func (c *container) MappingMode() uint32 {
+	c.intLock.RLock()
+	defer c.intLock.RUnlock()
+
+	return c.mappingMode
 }
 
 func (c *container) ProcRoPaths() []string {
@@ -325,6 +333,10 @@ func (c *container) update(src *container) error {
 		c.gidSize = src.gidSize
 	}
 
+	if c.mappingMode != src.mappingMode {
+		c.mappingMode = src.mappingMode
+	}
+
 	if c.service != src.service {
 		c.service = src.service
 	}
@@ -378,6 +390,13 @@ func (c *container) SetCtime(t time.Time) {
 	defer c.intLock.Unlock()
 
 	c.ctime = t
+}
+
+func (c *container) SetMappingMode(mode uint32) {
+	c.intLock.Lock()
+	defer c.intLock.Unlock()
+
+	c.mappingMode = mode
 }
 
 func (c *container) Data(name string, offset int64, data *[]byte) (int, error) {

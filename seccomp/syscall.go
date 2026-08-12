@@ -34,3 +34,60 @@ type syscallCtx struct {
 	cntr        domain.ContainerIface // Container hosting the process generating the syscall
 	tracer      *syscallTracer        // Backpointer to the seccomp-tracer owning the syscall
 }
+
+func (s *syscallCtx) nsenterNamespaces() *[]domain.NStype {
+	// Nested identity still requires entering the L2 user namespace. The
+	// caller is privileged in the L1 user namespace, and nsexec orders the
+	// user namespace last so it can join the L2 pid/mount namespaces first.
+	// Do not omit userns here: doing so makes ownership and mount operations
+	// execute with L1 credentials and fails for an L2-owned mount namespace.
+	if s.processInfo == nil || s.cntr == nil || s.cntr.InitProc() == nil {
+		return &domain.AllNSs
+	}
+
+	processUserns, err := s.processInfo.UserNsInode()
+	if err != nil {
+		return &domain.AllNSs
+	}
+	containerUserns, err := s.cntr.InitProc().UserNsInode()
+	if err != nil || processUserns == containerUserns {
+		return &domain.AllNSs
+	}
+	parentUserns, err := s.processInfo.UserNsInodeParent()
+	if err == nil && useParentUserns(processUserns, parentUserns, containerUserns) {
+		return &domain.AllNSs
+	}
+	return &domain.AllNSs
+}
+
+func useParentUserns(processUserns, parentUserns, containerUserns domain.Inode) bool {
+	return processUserns != containerUserns && parentUserns == containerUserns
+}
+
+// isChildUsernsSpecialMount reports whether a procfs/sysfs mount request
+// comes from a process in a child user namespace distinct from the container
+// init's. Such nested (L2) mounts are executed directly by the requesting
+// process because the sysbox-fs nsenter helper runs as host root (kuid 0),
+// which the child userns maps to the overflow uid, so it cannot mount the
+// L2-owned mount namespace on the caller's behalf.
+func isChildUsernsSpecialMount(
+	process domain.ProcessIface,
+	cntr domain.ContainerIface,
+	fstype string) bool {
+
+	if fstype != "proc" && fstype != "sysfs" {
+		return false
+	}
+	if process == nil || cntr == nil || cntr.InitProc() == nil {
+		return false
+	}
+	processUserns, err := process.UserNsInode()
+	if err != nil {
+		return false
+	}
+	containerUserns, err := cntr.InitProc().UserNsInode()
+	if err != nil {
+		return false
+	}
+	return processUserns != containerUserns
+}
