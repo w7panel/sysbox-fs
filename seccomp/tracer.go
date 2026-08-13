@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"sync"
 	"syscall"
@@ -650,16 +651,6 @@ func (t *syscallTracer) processMount(
 
 	process := t.service.prs.ProcessCreate(req.Pid, 0, 0)
 
-	// A nested Sysbox (L2) process mounts procfs/sysfs from a child user
-	// namespace. The nsenter helper runs as host root (kuid 0), which that
-	// userns maps to the overflow uid, so it cannot mount the L2-owned mount
-	// namespace on the caller's behalf. The caller itself has CAP_SYS_ADMIN
-	// in the child userns, so let the kernel execute the mount directly.
-	if isChildUsernsSpecialMount(process, cntr, fstype) {
-		logrus.Debugf("child userns %s mount at %s: letting kernel execute directly", fstype, target)
-		return t.createContinueResponse(req.ID), nil
-	}
-
 	// cap_sys_admin capability is required for mount operations.
 	if !process.IsSysAdminCapabilitySet() {
 		logrus.Debugf("mount request from pid %d (%s %s) rejected: no CAP_SYS_ADMIN", req.Pid, fstype, target)
@@ -668,19 +659,47 @@ func (t *syscallTracer) processMount(
 
 	mount.Source, err = process.ResolveProcSelf(mount.Source)
 	if err != nil {
+		logrus.Warnf("mount source resolution failed for pid=%d source=%q fstype=%q: %v",
+			req.Pid, mount.Source, mount.FsType, err)
 		return t.createErrorResponse(req.ID, syscall.EACCES), nil
 	}
 
 	mount.Target, err = process.ResolveProcSelf(mount.Target)
 	if err != nil {
+		logrus.Warnf("mount target resolution failed for pid=%d target=%q fstype=%q: %v",
+			req.Pid, mount.Target, mount.FsType, err)
 		return t.createErrorResponse(req.ID, syscall.EACCES), nil
+	}
+	nestedSpecialMount := false
+	if normalized, ok := normalizeChildUsernsSpecialMountTarget(process, cntr, fstype, mount.Target); ok {
+		logrus.Warnf("normalizing nested %s mount target for pid=%d from %q to %q",
+			fstype, req.Pid, mount.Target, normalized)
+		callerUserns, callerErr := process.UserNsInode()
+		callerPidns, callerPidErr := os.Readlink(fmt.Sprintf("/proc/%d/ns/pid", req.Pid))
+		callerMntns, callerMntErr := os.Readlink(fmt.Sprintf("/proc/%d/ns/mnt", req.Pid))
+		pidOwner, pidOwnerErr := namespaceOwnerUsernsInode(req.Pid, "pid")
+		mntOwner, mntOwnerErr := namespaceOwnerUsernsInode(req.Pid, "mnt")
+		logrus.Warnf("nested mount namespace ownership pid=%d caller-userns=%d caller-err=%v caller-pidns=%q caller-pidns-err=%v caller-mntns=%q caller-mntns-err=%v pid-owner=%d pid-owner-err=%v mnt-owner=%d mnt-owner-err=%v",
+			req.Pid, callerUserns, callerErr, callerPidns, callerPidErr, callerMntns, callerMntErr,
+			pidOwner, pidOwnerErr, mntOwner, mntOwnerErr)
+		mount.Target = normalized
+		nestedSpecialMount = true
+		mount.nestedSpecialMount = true
 	}
 
 	// Verify the process has the proper rights to access the target and
-	// update it in case it requires path resolution.
-	mount.Target, err = process.PathAccess(mount.Target, 0, true)
-	if err != nil {
-		return t.createErrorResponse(req.ID, err), nil
+	// update it in case it requires path resolution. A child-userns proc/sys
+	// target is only visible through the L2 mount namespace, so the nsenter
+	// helper and kernel perform the authoritative check for that case.
+	if !nestedSpecialMount {
+		accessTarget := mount.Target
+		mount.Target, err = process.PathAccess(mount.Target, 0, true)
+		if err != nil {
+			logrus.Warnf("mount target access failed for pid=%d source=%q target=%q fstype=%q root=%q cwd=%q: %v",
+				req.Pid, mount.Source, accessTarget, mount.FsType,
+				process.Root(), process.Cwd(), err)
+			return t.createErrorResponse(req.ID, err), nil
+		}
 	}
 
 	// Collect process attributes required for mount execution.

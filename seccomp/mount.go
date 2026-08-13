@@ -30,8 +30,9 @@ import (
 
 // MountSyscall information structure.
 type mountSyscallInfo struct {
-	syscallCtx                  // syscall generic info
-	*domain.MountSyscallPayload // mount-syscall specific details
+	syscallCtx                       // syscall generic info
+	*domain.MountSyscallPayload      // mount-syscall specific details
+	nestedSpecialMount          bool // initial proc/sys mount in a child userns
 }
 
 // Mount syscall processing wrapper instruction.
@@ -46,8 +47,12 @@ func (m *mountSyscallInfo) process() (*sysResponse, error) {
 		return nil, fmt.Errorf("unexpected mount-service-helper handler")
 	}
 
-	// Adjust mount attributes attending to the process' root path.
-	m.targetAdjust()
+	// Adjust mount attributes attending to the process' root path. Nested
+	// special mounts are executed after entering the L2 namespaces, so their
+	// targets must remain in L2 coordinates (/proc or /sys).
+	if !m.nestedSpecialMount {
+		m.targetAdjust()
+	}
 
 	// Ensure that the mountInfoDB corresponding to the sys-container hosting
 	// this process has been already built. This info is necessary to be able
@@ -62,6 +67,17 @@ func (m *mountSyscallInfo) process() (*sysResponse, error) {
 	// Handle requests that create a new mountpoint for filesystems managed by
 	// sysbox-fs.
 	if mh.IsNewMount(m.Flags) {
+		// The first nested proc/sys mount bootstraps the very procfs that the
+		// mount-info parser normally reads. Avoid that dependency cycle; the
+		// helper and kernel still validate and execute the generated payload.
+		if m.nestedSpecialMount {
+			switch m.FsType {
+			case "proc":
+				return m.processProcMount(nil)
+			case "sysfs":
+				return m.processSysMount(nil)
+			}
+		}
 
 		mip, err := mts.NewMountInfoParser(m.cntr, m.processInfo, true, true, false)
 		if err != nil {
@@ -167,6 +183,58 @@ func (m *mountSyscallInfo) processProcMount(
 	// Create nsenter-event envelope.
 	nss := m.tracer.service.nss
 	namespaces := m.nsenterNamespaces()
+	var targetFd int = -1
+	var detachedMountFd int = -1
+	if m.nestedSpecialMount {
+		openPayload := &domain.Openat2SyscallPayload{
+			Path:       m.Target,
+			Flags:      unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
+			PinnedRoot: true,
+		}
+		openEvent := nss.NewEvent(
+			m.syscallCtx.pid,
+			m.syscallCtx.uid,
+			m.syscallCtx.gid,
+			&domain.AllNSs,
+			0,
+			&domain.NSenterMessage{Type: domain.Openat2SyscallRequest, Payload: openPayload},
+			nil,
+			false,
+		)
+		if err := nss.SendRequestEvent(openEvent); err != nil {
+			return nil, err
+		}
+		openResponse := nss.ReceiveResponseEvent(openEvent)
+		if openResponse.Type == domain.ErrorResponse {
+			err := openResponse.Payload.(fuse.IOerror)
+			return m.tracer.createErrorResponse(m.reqId, err.Code), nil
+		}
+		targetFd = openResponse.Payload.(domain.Openat2RespPayload).Fd
+		defer unix.Close(targetFd)
+
+		pidNamespaceOnly := []domain.NStype{domain.NStypePid}
+		detachedEvent := nss.NewEvent(
+			m.syscallCtx.pid,
+			m.syscallCtx.uid,
+			m.syscallCtx.gid,
+			&pidNamespaceOnly,
+			uint32(unix.CLONE_NEWNS),
+			&domain.NSenterMessage{Type: domain.DetachedMountRequest, Payload: (*payload)[0]},
+			nil,
+			false,
+		)
+		if err := nss.SendRequestEvent(detachedEvent); err != nil {
+			return nil, err
+		}
+		detachedResponse := nss.ReceiveResponseEvent(detachedEvent)
+		if detachedResponse.Type == domain.ErrorResponse {
+			err := detachedResponse.Payload.(fuse.IOerror)
+			return m.tracer.createErrorResponse(m.reqId, err.Code), nil
+		}
+		detachedMountFd = detachedResponse.Payload.(domain.DetachedMountRespPayload).Fd
+		defer unix.Close(detachedMountFd)
+		namespaces = &domain.AllNSsButUser
+	}
 	event := nss.NewEvent(
 		m.syscallCtx.pid,
 		m.syscallCtx.uid,
@@ -180,6 +248,9 @@ func (m *mountSyscallInfo) processProcMount(
 		nil,
 		false,
 	)
+	if m.nestedSpecialMount {
+		event.SetRequestFileDescriptors([]int{targetFd, detachedMountFd})
+	}
 
 	// Launch nsenter-event.
 	err := nss.SendRequestEvent(event)
@@ -191,7 +262,8 @@ func (m *mountSyscallInfo) processProcMount(
 	responseMsg := nss.ReceiveResponseEvent(event)
 	if responseMsg.Type == domain.ErrorResponse {
 		err := responseMsg.Payload.(fuse.IOerror)
-		logrus.Debugf("proc mount helper failed: %s", err.Message)
+		logrus.Warnf("proc mount helper failed for pid=%d root=%q cwd=%q target=%q: %s",
+			m.pid, m.root, m.cwd, m.Target, err.Message)
 		resp := m.tracer.createErrorResponse(
 			m.reqId,
 			err.Code)
@@ -235,11 +307,21 @@ func (m *mountSyscallInfo) createProcPayload(
 
 	// Payload instruction for original "/proc" mount request.
 	payload = append(payload, m.MountSyscallPayload)
+	if m.nestedSpecialMount {
+		payload[0].Header = domain.NSenterMsgHeader{
+			Root:         m.root,
+			Cwd:          m.cwd,
+			Capabilities: m.processInfo.GetEffCaps(),
+		}
+	}
 
 	// If procfs has a read-only attribute at super-block level, we must also
 	// apply this to the new mountpoint (otherwise we will get a permission
 	// denied from the kernel when doing the mount).
-	procInfo := mip.GetInfo("/proc")
+	var procInfo *domain.MountInfo
+	if mip != nil {
+		procInfo = mip.GetInfo("/proc")
+	}
 	if procInfo != nil {
 		if _, ok := procInfo.VfsOptions["ro"]; ok {
 			payload[0].Flags |= unix.MS_RDONLY
@@ -349,6 +431,9 @@ func (m *mountSyscallInfo) processSysMount(
 	// Create nsenter-event envelope.
 	nss := m.tracer.service.nss
 	namespaces := m.nsenterNamespaces()
+	if m.nestedSpecialMount {
+		namespaces = &domain.AllNSsButUser
+	}
 	event := nss.NewEvent(
 		m.syscallCtx.pid,
 		m.syscallCtx.uid,
@@ -391,11 +476,21 @@ func (m *mountSyscallInfo) createSysPayload(
 
 	// Payload instruction for original "/sys" mount request.
 	payload = append(payload, m.MountSyscallPayload)
+	if m.nestedSpecialMount {
+		payload[0].Header = domain.NSenterMsgHeader{
+			Root:         m.root,
+			Cwd:          m.cwd,
+			Capabilities: m.processInfo.GetEffCaps(),
+		}
+	}
 
 	// If sysfs has a read-only attribute at super-block level, we must also
 	// apply this to the new mountpoint (otherwise we will get a permission
 	// denied from the kernel when doing the mount).
-	sysInfo := mip.GetInfo("/sys")
+	var sysInfo *domain.MountInfo
+	if mip != nil {
+		sysInfo = mip.GetInfo("/sys")
+	}
 	if sysInfo != nil {
 		if _, ok := sysInfo.VfsOptions["ro"]; ok {
 			payload[0].Flags |= unix.MS_RDONLY

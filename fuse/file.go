@@ -80,10 +80,10 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 	//
 	// Notice, that in certain cases we may want to skip this uid/gid remapping
 	// process for certain nodes if its associated handler requests so.
-	if a.Uid == 0 && !f.skipIdRemap {
+	if a.Uid == 0 && !f.skipIdRemap && f.server.MappingMode() != 1 {
 		a.Uid = f.server.ContainerUID()
 	}
-	if a.Gid == 0 && !f.skipIdRemap {
+	if a.Gid == 0 && !f.skipIdRemap && f.server.MappingMode() != 1 {
 		a.Gid = f.server.ContainerGID()
 	}
 

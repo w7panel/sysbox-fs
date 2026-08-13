@@ -107,7 +107,8 @@ type NSenterEvent struct {
 	service *nsenterService
 
 	// File descriptors exchanged via SCM_RIGHTS
-	fileDescr []int
+	fileDescr    []int
+	reqFileDescr []int
 }
 
 //
@@ -132,6 +133,10 @@ func (e *NSenterEvent) GetResponseMsg() *domain.NSenterMessage {
 
 func (e *NSenterEvent) GetProcessID() uint32 {
 	return uint32(e.Process.Pid)
+}
+
+func (e *NSenterEvent) SetRequestFileDescriptors(fds []int) {
+	e.reqFileDescr = append([]int(nil), fds...)
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -322,6 +327,17 @@ func (e *NSenterEvent) processResponse(pipe *os.File) error {
 		e.ResMsg = &domain.NSenterMessage{
 			Type:    nsenterMsg.Type,
 			Payload: "",
+		}
+		break
+
+	case domain.DetachedMountResponse:
+		logrus.Debug("Received nsenterEvent detachedMountResponse message.")
+		if len(fds) == 0 {
+			return fmt.Errorf("expected valid file descriptor for detached mount response, got %v", fds)
+		}
+		e.ResMsg = &domain.NSenterMessage{
+			Type:    nsenterMsg.Type,
+			Payload: domain.DetachedMountRespPayload{Fd: fds[0]},
 		}
 		break
 
@@ -620,12 +636,48 @@ func (e *NSenterEvent) SendRequest() error {
 		Value: e.CloneFlags,
 	})
 
+	// For the target-opening half of a nested mount, pin the tracee root before
+	// nsexec enters its namespaces. Once inside the L2 userns the helper can
+	// safely chroot through this fd and open the mountpoint.
+	extraFiles := []*os.File{childPipe, logChild}
+	env := []string{"_LIBCONTAINER_INITPIPE=3", "_LIBCONTAINER_LOGPIPE=4", fmt.Sprintf("GOMAXPROCS=%s", os.Getenv("GOMAXPROCS"))}
+	var traceeRoot *os.File
+	if e.ReqMsg != nil && e.ReqMsg.Type == domain.Openat2SyscallRequest {
+		if payload, ok := e.ReqMsg.Payload.(*domain.Openat2SyscallPayload); ok && payload.PinnedRoot {
+			rootFd, openErr := unix.Open(fmt.Sprintf("/proc/%d/root", e.Pid), unix.O_PATH|unix.O_CLOEXEC, 0)
+			if openErr != nil {
+				return fmt.Errorf("opening nested tracee root: %w", openErr)
+			}
+			traceeRoot = os.NewFile(uintptr(rootFd), "nested-tracee-root")
+			defer traceeRoot.Close()
+			extraFiles = append(extraFiles, traceeRoot)
+			env = append(env, "_SYSBOX_NSENTER_ROOTFD=5")
+		}
+	}
+	var requestFiles []*os.File
+	for i, fd := range e.reqFileDescr {
+		dupFd, dupErr := unix.Dup(fd)
+		if dupErr != nil {
+			return fmt.Errorf("duplicating nsenter request fd: %w", dupErr)
+		}
+		requestFile := os.NewFile(uintptr(dupFd), fmt.Sprintf("nsenter-request-fd-%d", i))
+		defer requestFile.Close()
+		requestFiles = append(requestFiles, requestFile)
+		extraFiles = append(extraFiles, requestFile)
+	}
+	if len(e.reqFileDescr) > 0 {
+		env = append(env, "_SYSBOX_NSENTER_MOUNTTARGETFD=5")
+		if len(e.reqFileDescr) > 1 {
+			env = append(env, "_SYSBOX_NSENTER_DETACHEDMOUNTFD=6")
+		}
+	}
+
 	// Prepare exec.cmd in charge of running: "sysbox-fs nsenter".
 	cmd := &exec.Cmd{
 		Path:        "/proc/self/exe",
 		Args:        []string{os.Args[0], "nsenter"},
-		ExtraFiles:  []*os.File{childPipe, logChild},
-		Env:         []string{"_LIBCONTAINER_INITPIPE=3", "_LIBCONTAINER_LOGPIPE=4", fmt.Sprintf("GOMAXPROCS=%s", os.Getenv("GOMAXPROCS"))},
+		ExtraFiles:  extraFiles,
+		Env:         env,
 		SysProcAttr: &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM},
 		Stdin:       nil,
 		Stdout:      nil,
@@ -1097,6 +1149,11 @@ func (e *NSenterEvent) processMountSyscallRequest() error {
 	)
 
 	payload := e.ReqMsg.Payload.([]domain.MountSyscallPayload)
+	helperNs := make(map[string]string)
+	for _, ns := range []string{"user", "pid", "mnt"} {
+		link, linkErr := os.Readlink("/proc/self/ns/" + ns)
+		helperNs[ns] = fmt.Sprintf("%s(err=%v)", link, linkErr)
+	}
 
 	// Extract payload-header from the first element
 	header := payload[0].Header
@@ -1131,6 +1188,33 @@ func (e *NSenterEvent) processMountSyscallRequest() error {
 		}
 	}
 
+	if (payload[0].FsType == "proc" || payload[0].FsType == "sysfs") && header.Root != "" {
+		targetFd, convErr := strconv.Atoi(os.Getenv("_SYSBOX_NSENTER_MOUNTTARGETFD"))
+		if convErr != nil {
+			e.ResMsg = &domain.NSenterMessage{Type: domain.ErrorResponse, Payload: &fuse.IOerror{RcvError: convErr}}
+			return nil
+		}
+		mountFd, mountConvErr := strconv.Atoi(os.Getenv("_SYSBOX_NSENTER_DETACHEDMOUNTFD"))
+		if mountConvErr != nil {
+			e.ResMsg = &domain.NSenterMessage{Type: domain.ErrorResponse, Payload: &fuse.IOerror{RcvError: mountConvErr}}
+			return nil
+		}
+		flags := unix.MOVE_MOUNT_F_EMPTY_PATH | unix.MOVE_MOUNT_T_EMPTY_PATH
+		if err := unix.MoveMount(mountFd, "", targetFd, "", flags); err != nil {
+			e.ResMsg = &domain.NSenterMessage{Type: domain.ErrorResponse, Payload: &fuse.IOerror{RcvError: err}}
+			return nil
+		}
+		e.ResMsg = &domain.NSenterMessage{Type: domain.MountSyscallResponse, Payload: ""}
+		return nil
+	}
+	capHeader := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+	capData := [2]unix.CapUserData{}
+	capErr := unix.Capget(&capHeader, &capData[0])
+	credContext := fmt.Sprintf("euid=%d egid=%d capeff=%08x%08x capget=%v",
+		os.Geteuid(), os.Getegid(), capData[1].Effective, capData[0].Effective, capErr)
+	credContext += fmt.Sprintf(" helper-userns=%q helper-pidns=%q helper-mntns=%q",
+		helperNs["user"], helperNs["pid"], helperNs["mnt"])
+
 	// Perform mount instructions.
 	for i = 0; i < len(payload); i++ {
 		err = unix.Mount(
@@ -1146,8 +1230,21 @@ func (e *NSenterEvent) processMountSyscallRequest() error {
 	}
 
 	if err != nil {
-		logrus.Debugf("nsenter mount failed: source=%s target=%s fstype=%s flags=%#x: %v",
-			payload[i].Source, payload[i].Target, payload[i].FsType, payload[i].Flags, err)
+		probeContext := ""
+		if i == 0 && payload[i].FsType == "proc" && errors.Is(err, unix.EPERM) {
+			probeDir := "/.sysbox-proc-mount-probe"
+			probeMkdirErr := os.Mkdir(probeDir, 0700)
+			probeErr := unix.Mount("proc", probeDir, "proc", uintptr(payload[i].Flags), payload[i].Data)
+			if probeErr == nil {
+				_ = unix.Unmount(probeDir, unix.MNT_DETACH)
+			}
+			_ = os.Remove(probeDir)
+			probeContext = fmt.Sprintf(" probe-mkdir=%v probe-mount=%v", probeMkdirErr, probeErr)
+		}
+		mountErr := fmt.Errorf("mount instruction %d/%d source=%q target=%q fstype=%q flags=%#x %s: %w",
+			i+1, len(payload), payload[i].Source, payload[i].Target,
+			payload[i].FsType, payload[i].Flags, credContext+probeContext, err)
+		logrus.Warnf("nsenter %s", mountErr)
 		// Unmount previously executed mount instructions (unless it's a remount).
 		//
 		// TODO: ideally we would revert remounts too, but to do this we need information
@@ -1161,7 +1258,7 @@ func (e *NSenterEvent) processMountSyscallRequest() error {
 		// Create error response msg.
 		e.ResMsg = &domain.NSenterMessage{
 			Type:    domain.ErrorResponse,
-			Payload: &fuse.IOerror{RcvError: err},
+			Payload: &fuse.IOerror{RcvError: mountErr},
 		}
 
 		return nil
@@ -1173,6 +1270,65 @@ func (e *NSenterEvent) processMountSyscallRequest() error {
 		Payload: "",
 	}
 
+	return nil
+}
+
+func createDetachedMount(p domain.MountSyscallPayload) (int, error) {
+	fsFd, err := unix.Fsopen(p.FsType, unix.FSOPEN_CLOEXEC)
+	if err != nil {
+		return -1, fmt.Errorf("fsopen nested %s: %w", p.FsType, err)
+	}
+	defer unix.Close(fsFd)
+
+	if p.Data != "" {
+		for _, option := range strings.Split(p.Data, ",") {
+			if option == "" {
+				continue
+			}
+			key, value, hasValue := strings.Cut(option, "=")
+			if hasValue {
+				err = unix.FsconfigSetString(fsFd, key, value)
+			} else {
+				err = unix.FsconfigSetFlag(fsFd, key)
+			}
+			if err != nil {
+				return -1, fmt.Errorf("fsconfig nested %s option %q: %w", p.FsType, option, err)
+			}
+		}
+	}
+	if err := unix.FsconfigCreate(fsFd); err != nil {
+		return -1, fmt.Errorf("fsconfig create nested %s: %w", p.FsType, err)
+	}
+
+	mountAttrs := 0
+	if p.Flags&unix.MS_RDONLY != 0 {
+		mountAttrs |= unix.MOUNT_ATTR_RDONLY
+	}
+	if p.Flags&unix.MS_NOSUID != 0 {
+		mountAttrs |= unix.MOUNT_ATTR_NOSUID
+	}
+	if p.Flags&unix.MS_NODEV != 0 {
+		mountAttrs |= unix.MOUNT_ATTR_NODEV
+	}
+	if p.Flags&unix.MS_NOEXEC != 0 {
+		mountAttrs |= unix.MOUNT_ATTR_NOEXEC
+	}
+	mountFd, err := unix.Fsmount(fsFd, unix.FSMOUNT_CLOEXEC, mountAttrs)
+	if err != nil {
+		return -1, fmt.Errorf("fsmount nested %s: %w", p.FsType, err)
+	}
+	return mountFd, nil
+}
+
+func (e *NSenterEvent) processDetachedMountRequest() error {
+	p := e.ReqMsg.Payload.(domain.MountSyscallPayload)
+	fd, err := createDetachedMount(p)
+	if err != nil {
+		e.ResMsg = &domain.NSenterMessage{Type: domain.ErrorResponse, Payload: &fuse.IOerror{RcvError: err}}
+		return nil
+	}
+	e.fileDescr = []int{fd}
+	e.ResMsg = &domain.NSenterMessage{Type: domain.DetachedMountResponse, Payload: nil}
 	return nil
 }
 
@@ -1588,6 +1744,21 @@ func (e *NSenterEvent) processOpenat2SyscallRequest(pipe *os.File) (int, error) 
 	var err error
 
 	p := e.ReqMsg.Payload.(domain.Openat2SyscallPayload)
+	if p.PinnedRoot {
+		rootFd, convErr := strconv.Atoi(os.Getenv("_SYSBOX_NSENTER_ROOTFD"))
+		if convErr != nil {
+			return -1, convErr
+		}
+		if err := unix.Fchdir(rootFd); err != nil {
+			return -1, fmt.Errorf("fchdir nested root fd %d: %w", rootFd, err)
+		}
+		if err := unix.Chroot("."); err != nil {
+			return -1, fmt.Errorf("chroot nested root fd %d: %w", rootFd, err)
+		}
+		if err := unix.Chdir("/"); err != nil {
+			return -1, fmt.Errorf("chdir nested root: %w", err)
+		}
+	}
 
 	// If requested, verify that the target file resides on sysbox-fs
 	if p.CheckForSysboxfs {
@@ -1615,20 +1786,22 @@ func (e *NSenterEvent) processOpenat2SyscallRequest(pipe *os.File) (int, error) 
 	pid := os.Getpid()
 	this := e.service.prs.ProcessCreate(uint32(pid), 0, 0)
 
-	if err := this.AdjustPersonality(
-		e.Uid,
-		e.Gid,
-		p.Header.Root,
-		p.Header.Cwd,
-		p.Header.Capabilities); err != nil {
+	if !p.PinnedRoot {
+		if err := this.AdjustPersonality(
+			e.Uid,
+			e.Gid,
+			p.Header.Root,
+			p.Header.Cwd,
+			p.Header.Capabilities); err != nil {
 
-		// Send an error-message response.
-		e.ResMsg = &domain.NSenterMessage{
-			Type:    domain.ErrorResponse,
-			Payload: &fuse.IOerror{RcvError: err},
+			// Send an error-message response.
+			e.ResMsg = &domain.NSenterMessage{
+				Type:    domain.ErrorResponse,
+				Payload: &fuse.IOerror{RcvError: err},
+			}
+
+			return -1, nil
 		}
-
-		return -1, nil
 	}
 
 	how := &unix.OpenHow{
@@ -1866,6 +2039,16 @@ func (e *NSenterEvent) processRequest(pipe *os.File) error {
 
 		return e.processMountSyscallRequest()
 
+	case domain.DetachedMountRequest:
+		var p domain.MountSyscallPayload
+		if payload != nil {
+			if err := json.Unmarshal(payload, &p); err != nil {
+				return err
+			}
+		}
+		e.ReqMsg = &domain.NSenterMessage{Type: nsenterMsg.Type, Payload: p}
+		return e.processDetachedMountRequest()
+
 	case domain.UmountSyscallRequest:
 		var p []domain.UmountSyscallPayload
 		if payload != nil {
@@ -2026,9 +2209,21 @@ func Init() (err error) {
 	var pipe = os.NewFile(uintptr(pipefd), "pipe")
 	defer pipe.Close()
 
-	// Clear the current process's environment to clean any libcontainer
-	// specific env vars.
+	// Preserve optional nested-mount fds while clearing all other
+	// libcontainer bootstrap variables.
+	nsenterMountTargetFd := os.Getenv("_SYSBOX_NSENTER_MOUNTTARGETFD")
+	nsenterDetachedMountFd := os.Getenv("_SYSBOX_NSENTER_DETACHEDMOUNTFD")
+	nsenterRootFd := os.Getenv("_SYSBOX_NSENTER_ROOTFD")
 	os.Clearenv()
+	if nsenterMountTargetFd != "" {
+		_ = os.Setenv("_SYSBOX_NSENTER_MOUNTTARGETFD", nsenterMountTargetFd)
+	}
+	if nsenterDetachedMountFd != "" {
+		_ = os.Setenv("_SYSBOX_NSENTER_DETACHEDMOUNTFD", nsenterDetachedMountFd)
+	}
+	if nsenterRootFd != "" {
+		_ = os.Setenv("_SYSBOX_NSENTER_ROOTFD", nsenterRootFd)
+	}
 
 	// Setup nsenterService and its dependencies.
 	var nsenterSvc = NewNSenterService()

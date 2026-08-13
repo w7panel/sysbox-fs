@@ -240,6 +240,16 @@ func (s *fuseServer) ContainerGID() uint32 {
 	return s.containerGid
 }
 
+// MappingMode returns the explicit mapping mode associated with this server's
+// container. It is intentionally used instead of inferring nested identity
+// from a zero host UID/GID.
+func (s *fuseServer) MappingMode() uint32 {
+	if s.container == nil {
+		return 0
+	}
+	return s.container.MappingMode()
+}
+
 func (s *fuseServer) SetCntrRegComplete() {
 	s.cntrReg = true
 }

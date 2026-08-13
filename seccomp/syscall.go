@@ -17,7 +17,14 @@
 package seccomp
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+
 	"github.com/nestybox/sysbox-fs/domain"
+	"golang.org/x/sys/unix"
 )
 
 // Syscall generic information / state.
@@ -33,6 +40,25 @@ type syscallCtx struct {
 	processInfo domain.ProcessIface   // Process details associated to the syscall request
 	cntr        domain.ContainerIface // Container hosting the process generating the syscall
 	tracer      *syscallTracer        // Backpointer to the seccomp-tracer owning the syscall
+}
+
+func namespaceOwnerUsernsInode(pid uint32, nstype string) (domain.Inode, error) {
+	path := fmt.Sprintf("/proc/%d/ns/%s", pid, nstype)
+	ns, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer ns.Close()
+	ownerFd, _, errno := unix.Syscall(unix.SYS_IOCTL, ns.Fd(), unix.NS_GET_USERNS, 0)
+	if errno != 0 {
+		return 0, errno
+	}
+	defer unix.Close(int(ownerFd))
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(ownerFd), &st); err != nil {
+		return 0, err
+	}
+	return domain.Inode(st.Ino), nil
 }
 
 func (s *syscallCtx) nsenterNamespaces() *[]domain.NStype {
@@ -64,30 +90,47 @@ func useParentUserns(processUserns, parentUserns, containerUserns domain.Inode) 
 	return processUserns != containerUserns && parentUserns == containerUserns
 }
 
-// isChildUsernsSpecialMount reports whether a procfs/sysfs mount request
-// comes from a process in a child user namespace distinct from the container
-// init's. Such nested (L2) mounts are executed directly by the requesting
-// process because the sysbox-fs nsenter helper runs as host root (kuid 0),
-// which the child userns maps to the overflow uid, so it cannot mount the
-// L2-owned mount namespace on the caller's behalf.
-func isChildUsernsSpecialMount(
+// normalizeChildUsernsSpecialMountTarget handles mount notifications inherited
+// across a nested Sysbox boundary. Resolving the tracee's procfd from L1 can
+// produce an L1-visible path such as <L2-rootfs>/proc; PathAccess expects a path
+// in L2 coordinates and would otherwise prepend the rootfs a second time.
+func normalizeChildUsernsSpecialMountTarget(
 	process domain.ProcessIface,
 	cntr domain.ContainerIface,
-	fstype string) bool {
+	fstype, target string) (string, bool) {
 
-	if fstype != "proc" && fstype != "sysfs" {
-		return false
+	var expected string
+	switch fstype {
+	case "proc":
+		expected = "/proc"
+	case "sysfs":
+		expected = "/sys"
+	default:
+		return target, false
 	}
-	if process == nil || cntr == nil || cntr.InitProc() == nil {
-		return false
+	if process == nil || cntr == nil || target == "" {
+		return target, false
+	}
+	root := filepath.Clean(process.Root())
+	cleanTarget := filepath.Clean(target)
+	rootedTarget := filepath.Join(root, strings.TrimPrefix(expected, "/"))
+	if cleanTarget != expected && cleanTarget != rootedTarget {
+		return target, false
+	}
+	initProc := cntr.InitProc()
+	if initProc == nil {
+		return target, false
 	}
 	processUserns, err := process.UserNsInode()
 	if err != nil {
-		return false
+		return target, false
 	}
-	containerUserns, err := cntr.InitProc().UserNsInode()
+	containerUserns, err := initProc.UserNsInode()
 	if err != nil {
-		return false
+		return target, false
 	}
-	return processUserns != containerUserns
+	if processUserns == containerUserns {
+		return target, false
+	}
+	return expected, true
 }

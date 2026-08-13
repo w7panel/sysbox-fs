@@ -74,6 +74,8 @@ const (
 	ReadLinkResponse           NSenterMsgType = "readLinkResponse"
 	MountSyscallRequest        NSenterMsgType = "mountSyscallRequest"
 	MountSyscallResponse       NSenterMsgType = "mountSyscallResponse"
+	DetachedMountRequest       NSenterMsgType = "detachedMountRequest"
+	DetachedMountResponse      NSenterMsgType = "detachedMountResponse"
 	UmountSyscallRequest       NSenterMsgType = "umountSyscallRequest"
 	UmountSyscallResponse      NSenterMsgType = "umountSyscallResponse"
 	ChownSyscallRequest        NSenterMsgType = "chownSyscallRequest"
@@ -141,6 +143,7 @@ type NSenterEventIface interface {
 	SetResponseMsg(m *NSenterMessage)
 	GetResponseMsg() *NSenterMessage
 	GetProcessID() uint32
+	SetRequestFileDescriptors(fds []int)
 }
 
 // NSenterMessage struct defines the layout of the messages being exchanged
@@ -297,8 +300,13 @@ type Openat2SyscallPayload struct {
 	Mode             uint64           `json:"mode"`
 	Resolve          uint64           `json:"resolve"`
 	CheckForSysboxfs bool             `json:"verifyfs"`
+	PinnedRoot       bool             `json:"pinnedRoot,omitempty"`
 }
 
 type Openat2RespPayload struct {
+	Fd int `json:"fd"`
+}
+
+type DetachedMountRespPayload struct {
 	Fd int `json:"fd"`
 }
