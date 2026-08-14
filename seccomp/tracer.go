@@ -670,6 +670,7 @@ func (t *syscallTracer) processMount(
 			req.Pid, mount.Target, mount.FsType, err)
 		return t.createErrorResponse(req.ID, syscall.EACCES), nil
 	}
+
 	nestedSpecialMount := false
 	if normalized, ok := normalizeChildUsernsSpecialMountTarget(process, cntr, fstype, mount.Target); ok {
 		logrus.Warnf("normalizing nested %s mount target for pid=%d from %q to %q",
@@ -685,6 +686,18 @@ func (t *syscallTracer) processMount(
 		mount.Target = normalized
 		nestedSpecialMount = true
 		mount.nestedSpecialMount = true
+	}
+
+	// Mount notifications inherited by a nested-identity container also cover
+	// mounts issued by runtimes inside L2 (for example Docker's stock runc).
+	// Their absolute paths exist only in the L2 mount namespace, so validating
+	// them through the L1-visible procfs view produces false ENOENT failures.
+	// Only the initial /proc and /sys mounts used to bootstrap an L2 Sysbox
+	// container require the detached-mount path above. Let the kernel execute
+	// every other child-userns mount (including an L3 runtime's rootfs/proc and
+	// rootfs/sys mounts) and enforce permissions in the caller's namespaces.
+	if isChildUsernsProcess(process, cntr) && !nestedSpecialMount {
+		return t.createContinueResponse(req.ID), nil
 	}
 
 	// Verify the process has the proper rights to access the target and
@@ -719,6 +732,21 @@ func (t *syscallTracer) processMount(
 
 	// Process mount syscall.
 	return mount.process()
+}
+
+func isChildUsernsProcess(process domain.ProcessIface, cntr domain.ContainerIface) bool {
+	if process == nil || cntr == nil || cntr.InitProc() == nil {
+		return false
+	}
+	processUserns, err := process.UserNsInode()
+	if err != nil {
+		return false
+	}
+	containerUserns, err := cntr.InitProc().UserNsInode()
+	if err != nil {
+		return false
+	}
+	return processUserns != containerUserns
 }
 
 func (t *syscallTracer) processUmount(
@@ -761,6 +789,15 @@ func (t *syscallTracer) processUmount(
 	process := t.service.prs.ProcessCreate(req.Pid, 0, 0)
 	if !(process.IsSysAdminCapabilitySet()) {
 		return t.createErrorResponse(req.ID, syscall.EPERM), nil
+	}
+
+	// As with ordinary mounts, umount notifications issued by a runtime in a
+	// child user namespace refer to paths and mount objects owned by that
+	// runtime's namespace. Let the kernel resolve and authorize them there;
+	// the parent container's mount hardening state is neither addressable nor
+	// mutable from the child mount namespace.
+	if isChildUsernsProcess(process, cntr) {
+		return t.createContinueResponse(req.ID), nil
 	}
 
 	umount.Target, err = process.ResolveProcSelf(umount.Target)
