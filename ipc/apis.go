@@ -17,6 +17,8 @@
 package ipc
 
 import (
+	"path/filepath"
+
 	"github.com/sirupsen/logrus"
 
 	"github.com/nestybox/sysbox-fs/domain"
@@ -67,18 +69,37 @@ func (ips *ipcService) Init() error {
 }
 
 func ContainerPreRegister(ctx interface{}, data *grpc.ContainerData) error {
-	if !ipcLib.MappingMode(data.MappingMode).Valid() {
+	mode := ipcLib.MappingMode(data.MappingMode)
+	if !mode.Valid() {
 		return grpcStatus.Error(grpcCodes.InvalidArgument, "invalid mapping mode")
 	}
 
 	ipcService := ctx.(*ipcService)
 
-	err := ipcService.css.ContainerPreRegister(data.Id, data.Netns)
+	err := ipcService.css.ContainerPreRegister(data.Id, preRegisterNetnsPath(data.Netns, mode))
 	if err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// preRegisterNetnsPath resolves the transient CRI netns handle through the L1
+// init process when sysbox-fs runs in a hostPID agent with its own mount
+// namespace. Do not broaden this to arbitrary paths: only the CNI-managed
+// directory is part of the nested runtime contract.
+func preRegisterNetnsPath(netns string, mode ipcLib.MappingMode) string {
+	if netns == "" || mode != ipcLib.NestedIdentity {
+		return netns
+	}
+
+	clean := filepath.Clean(netns)
+	dir := filepath.Dir(clean)
+	if dir != "/run/netns" && dir != "/var/run/netns" {
+		return netns
+	}
+
+	return "/proc/1/root" + clean
 }
 
 func ContainerRegister(ctx interface{}, data *grpc.ContainerData) error {

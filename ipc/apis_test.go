@@ -94,7 +94,6 @@ func Test_ipcService_Setup(t *testing.T) {
 		ios:    nil,
 		fuseMp: "/var/lib/sysboxfs",
 	}
-
 	tests := []struct {
 		name   string
 		fields fields
@@ -154,6 +153,14 @@ func TestContainerPreRegister(t *testing.T) {
 			Netns: "",
 		},
 	}
+	var a2 = args{
+		ctx: ctx,
+		data: &grpc.ContainerData{
+			Id:          "c2",
+			Netns:       "/var/run/netns/cni-test",
+			MappingMode: 1,
+		},
+	}
 
 	tests := []struct {
 		name    string
@@ -174,10 +181,22 @@ func TestContainerPreRegister(t *testing.T) {
 		},
 		{
 			//
-			// Test-case 2: Verify proper behavior during css' pre-registration
-			// error.
+			// Test-case 2: Nested CNI handles resolve through the L1 init root.
 			//
 			name:    "2",
+			args:    a2,
+			wantErr: false,
+			prepare: func() {
+				css.On("ContainerPreRegister", a2.data.Id,
+					"/proc/1/root/var/run/netns/cni-test").Return(nil)
+			},
+		},
+		{
+			//
+			// Test-case 3: Verify proper behavior during css' pre-registration
+			// error.
+			//
+			name:    "3",
 			args:    a1,
 			wantErr: true,
 			prepare: func() {
