@@ -246,7 +246,10 @@ func (m *mountSyscallInfo) createProcPayload(
 	mh := m.tracer.service.mts.MountHelper()
 
 	// Sysbox-fs "/proc" bind-mounts.
-	procBindMounts := mh.ProcMounts()
+	procBindMounts := existingProcMounts(mh.ProcMounts(), func(path string) bool {
+		_, err := m.processInfo.PathAccess(path, 0, true)
+		return err == nil
+	})
 	for _, v := range procBindMounts {
 		relPath := strings.TrimPrefix(v, "/proc")
 
@@ -328,6 +331,16 @@ func (m *mountSyscallInfo) createProcPayload(
 	}
 
 	return &payload
+}
+
+func existingProcMounts(mounts []string, exists func(string) bool) []string {
+	var result []string
+	for _, mount := range mounts {
+		if exists(mount) {
+			result = append(result, mount)
+		}
+	}
+	return result
 }
 
 // Method handles sysfs mount syscall requests. As part of this function, we
