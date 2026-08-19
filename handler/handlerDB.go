@@ -360,19 +360,26 @@ func (hs *handlerService) HostUuid() string {
 }
 
 func (hs *handlerService) FindHostUuid() (string, error) {
+	return readHostUuid("/sys/devices/virtual/dmi/id/product_uuid")
+}
 
-	hostUuid, err := ioutil.ReadFile("/sys/devices/virtual/dmi/id/product_uuid")
+const fallbackHostUuid = "00000000-0000-0000-0000-000000000000"
 
-	// Careful here: a missing 'product_uuid' is a perfectly valid scenario.
-	// Refer to 'handler/implementations/sysDevicesVirtualDmiId.go' for details.
+func readHostUuid(path string) (string, error) {
+	hostUuid, err := ioutil.ReadFile(path)
 	if err != nil && err != io.EOF {
-		if os.IsNotExist(err) {
-			hostUuid = []byte("00000000-0000-0000-0000-000000000000")
-		} else {
-			return "", err
+		// A nested user namespace may see the DMI node but not have permission
+		// to read it (the kernel exposes it as nobody:nobody, mode 0400). The
+		// UUID is only used to make the virtual DMI value stable; it must not
+		// make sysbox-fs unavailable in that namespace.
+		if os.IsNotExist(err) || os.IsPermission(err) {
+			return fallbackHostUuid, nil
 		}
+		return "", err
 	}
-
+	if len(hostUuid) == 0 {
+		return fallbackHostUuid, nil
+	}
 	return string(hostUuid), nil
 }
 
