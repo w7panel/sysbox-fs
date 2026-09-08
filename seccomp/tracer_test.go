@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/nestybox/sysbox-fs/mocks"
 	unixIpc "github.com/nestybox/sysbox-ipc/unix"
 	libseccomp "github.com/seccomp/libseccomp-golang"
 )
@@ -115,6 +116,27 @@ func TestIsStaleSeccompNotification(t *testing.T) {
 	if isStaleSeccompNotification(syscall.EPERM) {
 		t.Fatal("EPERM notification error should not be treated as stale")
 	}
+}
+
+func TestProcessSyscall_unknownContainerOpenat2Continues(t *testing.T) {
+	css := &mocks.ContainerStateServiceIface{}
+	css.On("ContainerLookupById", "inner-container").Return(nil).Once()
+	tracer := &syscallTracer{
+		service: &SyscallMonitorService{css: css},
+		syscalls: map[seccompArchSyscallPair]string{
+			{archId: libseccomp.ScmpArch(1), syscallId: libseccomp.ScmpSyscall(2)}: "openat2",
+		},
+	}
+	req := &sysRequest{ID: 42, Data: libseccomp.ScmpNotifData{Arch: 1, Syscall: 2}}
+
+	resp, err := tracer.processSyscall(req, 0, "inner-container")
+	if err != nil {
+		t.Fatalf("processSyscall returned error: %v", err)
+	}
+	if resp == nil || resp.Flags != libseccomp.NotifRespFlagContinue {
+		t.Fatalf("response = %#v, want continue", resp)
+	}
+	css.AssertExpectations(t)
 }
 
 func Test_syscallTracer_processSetxattr_skips_value_read_when_xattr_not_allowed(t *testing.T) {
