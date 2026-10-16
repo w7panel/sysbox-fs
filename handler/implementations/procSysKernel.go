@@ -341,6 +341,11 @@ func (h *ProcSysKernel) Open(
 	flags := n.OpenFlags()
 
 	switch resource {
+	case "threads-max":
+		if flags&syscall.O_ACCMODE == syscall.O_RDONLY {
+			return false, nil
+		}
+
 	case "cap_last_cap":
 		if flags&syscall.O_WRONLY == syscall.O_WRONLY ||
 			flags&syscall.O_RDWR == syscall.O_RDWR {
@@ -407,6 +412,9 @@ func (h *ProcSysKernel) Read(
 		req.ID, h.Name, resource)
 
 	switch resource {
+	case "threads-max":
+		return readHostFs(h, n, req.Offset, &req.Data)
+
 	case "cap_last_cap":
 		return readCntrData(h, n, req)
 
