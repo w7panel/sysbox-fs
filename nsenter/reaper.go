@@ -88,8 +88,14 @@ func reaper(signal chan bool, mu *sync.RWMutex) {
 		for {
 			// WNOHANG: if there is no child to reap, don't block
 			wpid, err := syscall.Wait4(-1, &wstatus, syscall.WNOHANG, nil)
-			if err != nil || wpid == 0 {
-				logrus.Infof("reaper: nothing to reap")
+			if err != nil {
+				if err != syscall.ECHILD {
+					logrus.Warnf("reaper: wait failed: %v", err)
+				}
+				break
+			}
+			if wpid == 0 {
+				logrus.Debugf("reaper: nothing to reap")
 				break
 			}
 
