@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -22,6 +24,7 @@ import (
 )
 
 const fsRestartFile = "/run/sysbox/fs-restart.json"
+const recoveryMetricsSocket = "/run/sysbox/recovery-metrics.sock"
 
 type recoveryRunner struct {
 	events                                      *recovery.Events
@@ -33,6 +36,7 @@ type recoveryRunner struct {
 	fallbackDone                                sync.Map
 	silentDone                                  sync.Map
 	attempts, succeeded, failed, stale, skipped uint64
+	faultEvents, frequentFaults                 uint64
 	faultCounts                                 map[faultProcess]int
 }
 
@@ -206,9 +210,13 @@ func (r *recoveryRunner) run(ctx context.Context) error {
 			return fmt.Errorf("FUSE fault event stream stopped: %w", err)
 		}
 		r.mu.Lock()
+		r.faultEvents++
 		process := faultProcess{fault.PID, fault.Namespace, fault.Device}
 		r.faultCounts[process]++
 		frequent := r.faultCounts[process] == frequentFaultThreshold
+		if frequent {
+			r.frequentFaults++
+		}
 		r.mu.Unlock()
 		if frequent {
 			logrus.WithFields(logrus.Fields{"pid": fault.PID, "namespace": fault.Namespace, "device": fault.Device}).Warn("frequent stale FUSE reads; process must reopen old descriptors")
@@ -266,6 +274,47 @@ func (r *recoveryRunner) repairSilentNamespaces(ctx context.Context, c state.Res
 	}
 }
 
+func (r *recoveryRunner) metrics(w http.ResponseWriter, req *http.Request) {
+	if req.URL.Path != "/metrics" {
+		http.NotFound(w, req)
+		return
+	}
+	r.mu.Lock()
+	values := [7]uint64{r.attempts, r.succeeded, r.failed, r.stale, r.skipped, r.faultEvents, r.frequentFaults}
+	r.mu.Unlock()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	for i, name := range [...]string{
+		"recovery_attempts", "recovery_successes", "recovery_failures", "recovery_old_fd_events",
+		"recovery_unsupported", "recovery_fault_events", "recovery_frequent_fault_processes",
+	} {
+		fmt.Fprintf(w, "sysbox_fs_%s_total %d\n", name, values[i])
+	}
+}
+
+func (r *recoveryRunner) serveMetrics(path string) (func(), error) {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		listener.Close()
+		return nil, err
+	}
+	server := &http.Server{Handler: http.HandlerFunc(r.metrics)}
+	go func() {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			logrus.WithError(err).Error("FUSE recovery metrics stopped")
+		}
+	}()
+	return func() {
+		server.Close()
+		os.Remove(path)
+	}, nil
+}
+
 func runRecoverable(r *recoveryRunner, ipc domain.IpcServiceIface, fss *fuse.FuseServerService, quiesce func() error, profile interface{ Stop() }) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -278,6 +327,11 @@ func runRecoverable(r *recoveryRunner, ipc domain.IpcServiceIface, fss *fuse.Fus
 		return err
 	}
 	defer libutils.DestroyPidFile(sysboxFsPidFile)
+	stopMetrics, err := r.serveMetrics(recoveryMetricsSocket)
+	if err != nil {
+		return err
+	}
+	defer stopMetrics()
 	result := make(chan error, 1)
 	go func() { result <- ipc.Init() }()
 	systemd.SdNotify(false, systemd.SdNotifyReady)
