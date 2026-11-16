@@ -23,6 +23,8 @@ import (
 const MountHelperArg = "--recover-mount-helper"
 const StaleTargetExitCode = 3
 
+var ErrUnsupportedPropagation = errors.New("unsupported mount propagation")
+
 type Device struct{ Major, Minor uint32 }
 
 type mountReplacement struct {
@@ -100,7 +102,7 @@ func mountPlan(reader io.Reader, allowed []Device) ([]mountReplacement, error) {
 			}
 			// A new FUSE superblock cannot join the old mount's propagation group.
 			if strings.HasPrefix(option, "shared:") || strings.HasPrefix(option, "master:") || strings.HasPrefix(option, "propagate_from:") {
-				return nil, fmt.Errorf("mount %s has unsupported propagation %s", item.Target, option)
+				return nil, fmt.Errorf("%w: mount %s has %s", ErrUnsupportedPropagation, item.Target, option)
 			}
 		}
 		for _, option := range strings.Split(mount.Options, ",") {
@@ -165,7 +167,7 @@ func mountPlan(reader io.Reader, allowed []Device) ([]mountReplacement, error) {
 					return nil, fmt.Errorf("invalid child mount path %s", m.Mountpoint)
 				}
 				if strings.Contains(m.Optional, "shared:") || strings.Contains(m.Optional, "master:") || strings.Contains(m.Optional, "propagate_from:") || strings.Contains(m.Optional, "unbindable") {
-					return nil, fmt.Errorf("unsupported child propagation: %s", m.Mountpoint)
+					return nil, fmt.Errorf("%w: child mount %s", ErrUnsupportedPropagation, m.Mountpoint)
 				}
 				if m.FSType == "fuse" && m.Source == "sysboxfs" && devices[Device{uint32(m.Major), uint32(m.Minor)}] {
 					return nil, fmt.Errorf("nested disconnected FUSE child: %s", m.Mountpoint)

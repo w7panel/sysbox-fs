@@ -24,16 +24,16 @@ import (
 const fsRestartFile = "/run/sysbox/fs-restart.json"
 
 type recoveryRunner struct {
-	events                             *recovery.Events
-	css                                domain.ContainerStateServiceIface
-	root                               string
-	records                            map[uint32][]state.RestartContainer
-	mu                                 sync.Mutex
-	repaired                           sync.Map
-	fallbackDone                       sync.Map
-	silentDone                         sync.Map
-	attempts, succeeded, failed, stale uint64
-	faultCounts                        map[faultProcess]int
+	events                                      *recovery.Events
+	css                                         domain.ContainerStateServiceIface
+	root                                        string
+	records                                     map[uint32][]state.RestartContainer
+	mu                                          sync.Mutex
+	repaired                                    sync.Map
+	fallbackDone                                sync.Map
+	silentDone                                  sync.Map
+	attempts, succeeded, failed, stale, skipped uint64
+	faultCounts                                 map[faultProcess]int
 }
 
 type faultProcess struct {
@@ -50,6 +50,7 @@ const (
 	repairFailed repairResult = iota
 	repairUnchanged
 	repairReplaced
+	repairUnsupported
 )
 
 func prepareRecovery(css domain.ContainerStateServiceIface, fss *fuse.FuseServerService, root string) (*recoveryRunner, error) {
@@ -136,6 +137,11 @@ func (r *recoveryRunner) repair(ctx context.Context, pid uint32, c state.Restart
 			r.stale++
 			return repairFailed
 		}
+		if errors.Is(err, recovery.ErrUnsupportedPropagation) {
+			r.skipped++
+			logrus.WithError(err).WithField("container", c.ID).WithField("pid", pid).Warn("FUSE recovery skipped unsupported namespace")
+			return repairUnsupported
+		}
 		r.failed++
 		logrus.WithError(err).WithField("container", c.ID).WithField("pid", pid).WithField("duration_ms", time.Since(started).Milliseconds()).Error("FUSE recovery incomplete")
 		return repairFailed
@@ -180,13 +186,13 @@ func (r *recoveryRunner) run(ctx context.Context) error {
 						}
 						// Only checkpointed, disconnected devices are eligible. Inspect
 						// mount metadata directly rather than block on a FUSE stat.
-						if r.repair(ctx, c.PID, c, c.Devices) != repairFailed {
+						if result := r.repair(ctx, c.PID, c, c.Devices); result != repairFailed && result != repairUnsupported {
 							r.fallbackDone.Store(c.ID, struct{}{})
 						}
 					}
 				}
 				r.mu.Lock()
-				logrus.WithFields(logrus.Fields{"attempts": r.attempts, "successes": r.succeeded, "failures": r.failed, "old_fd_events": r.stale}).Info("FUSE recovery counters")
+				logrus.WithFields(logrus.Fields{"attempts": r.attempts, "successes": r.succeeded, "failures": r.failed, "old_fd_events": r.stale, "unsupported": r.skipped}).Info("FUSE recovery counters")
 				r.mu.Unlock()
 			}
 		}

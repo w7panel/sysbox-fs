@@ -3,6 +3,7 @@ package recovery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -45,7 +46,7 @@ func TestMountPlanWhitelistAndAttributes(t *testing.T) {
 	}
 	for _, option := range []string{"shared:2", "master:3", "propagate_from:4"} {
 		line := strings.Replace(strings.Split(input, "\n")[0], " - ", " "+option+" - ", 1)
-		if _, err := mountPlan(strings.NewReader(line), []Device{{0, 21}}); err == nil {
+		if _, err := mountPlan(strings.NewReader(line), []Device{{0, 21}}); !errors.Is(err, ErrUnsupportedPropagation) {
 			t.Fatal("accepted unsupported propagation", option)
 		}
 	}
