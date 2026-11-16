@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -25,6 +27,7 @@ import (
 
 const fsRestartFile = "/run/sysbox/fs-restart.json"
 const recoveryMetricsSocket = "/run/sysbox/recovery-metrics.sock"
+const recoveryMetricsTextfile = "/run/sysbox-metrics/sysbox-fs.prom"
 
 type recoveryRunner struct {
 	events                                      *recovery.Events
@@ -298,13 +301,17 @@ func (r *recoveryRunner) metrics(w http.ResponseWriter, req *http.Request) {
 		http.NotFound(w, req)
 		return
 	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	r.writeMetrics(w)
+}
+
+func (r *recoveryRunner) writeMetrics(w io.Writer) {
 	r.mu.Lock()
 	values := [7]uint64{r.attempts, r.succeeded, r.failed, r.stale, r.skipped, r.faultEvents, r.frequentFaults}
 	duration := r.duration
 	durationCount := r.durationCount
 	durationBuckets := r.durationBuckets
 	r.mu.Unlock()
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	for i, name := range [...]string{
 		"recovery_attempts", "recovery_successes", "recovery_failures", "recovery_old_fd_events",
 		"recovery_unsupported", "recovery_fault_events", "recovery_frequent_fault_processes",
@@ -318,6 +325,49 @@ func (r *recoveryRunner) metrics(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "sysbox_fs_recovery_duration_seconds_bucket{le=\"+Inf\"} %d\n", durationCount)
 	fmt.Fprintf(w, "sysbox_fs_recovery_duration_seconds_sum %.9f\n", duration.Seconds())
 	fmt.Fprintf(w, "sysbox_fs_recovery_duration_seconds_count %d\n", durationCount)
+}
+
+func (r *recoveryRunner) writeMetricsTextfile(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	if err := os.Chmod(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	var data bytes.Buffer
+	r.writeMetrics(&data)
+	f, err := os.CreateTemp(filepath.Dir(path), ".sysbox-fs-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	if err := f.Chmod(0644); err != nil {
+		return err
+	}
+	if _, err := f.Write(data.Bytes()); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
+}
+
+func (r *recoveryRunner) exportMetrics(ctx context.Context, path string) {
+	defer os.Remove(path)
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		if err := r.writeMetricsTextfile(path); err != nil {
+			logrus.WithError(err).Warn("FUSE recovery metrics textfile update failed")
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func (r *recoveryRunner) serveMetrics(path string) (func(), error) {
@@ -361,6 +411,12 @@ func runRecoverable(r *recoveryRunner, ipc domain.IpcServiceIface, fss *fuse.Fus
 		return err
 	}
 	defer stopMetrics()
+	metricsDone := make(chan struct{})
+	go func() {
+		r.exportMetrics(ctx, recoveryMetricsTextfile)
+		close(metricsDone)
+	}()
+	defer func() { cancel(); <-metricsDone }()
 	result := make(chan error, 1)
 	go func() { result <- ipc.Init() }()
 	systemd.SdNotify(false, systemd.SdNotifyReady)

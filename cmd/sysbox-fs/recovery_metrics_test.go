@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -55,5 +56,38 @@ func TestRecoveryMetricsSocket(t *testing.T) {
 	stop()
 	if _, err := net.Dial("unix", path); err == nil {
 		t.Fatal("metrics socket survived shutdown")
+	}
+}
+
+func TestRecoveryMetricsTextfile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "metrics", "sysbox-fs.prom")
+	r := &recoveryRunner{attempts: 1}
+	if err := r.writeMetricsTextfile(path); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Fatalf("textfile mode = %o", info.Mode().Perm())
+	}
+	dir, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir.Mode().Perm() != 0755 {
+		t.Fatalf("metrics directory mode = %o", dir.Mode().Perm())
+	}
+	r.attempts = 2
+	if err := r.writeMetricsTextfile(path); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "sysbox_fs_recovery_attempts_total 2\n") {
+		t.Fatalf("stale textfile: %s", data)
 	}
 }
