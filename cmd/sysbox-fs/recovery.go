@@ -18,6 +18,7 @@ import (
 	"github.com/nestybox/sysbox-fs/state"
 	libutils "github.com/nestybox/sysbox-libs/utils"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sys/unix"
 )
 
 const fsRestartFile = "/run/sysbox/fs-restart.json"
@@ -30,8 +31,18 @@ type recoveryRunner struct {
 	mu                                 sync.Mutex
 	repaired                           sync.Map
 	fallbackDone                       sync.Map
+	silentDone                         sync.Map
 	attempts, succeeded, failed, stale uint64
+	faultCounts                        map[faultProcess]int
 }
+
+type faultProcess struct {
+	pid       uint32
+	namespace uint64
+	device    uint32
+}
+
+const frequentFaultThreshold = 5
 
 type repairResult int
 
@@ -63,7 +74,7 @@ func prepareRecovery(css domain.ContainerStateServiceIface, fss *fuse.FuseServer
 			}
 		}
 	}
-	r := &recoveryRunner{css: css, root: root, records: make(map[uint32][]state.RestartContainer)}
+	r := &recoveryRunner{css: css, root: root, records: make(map[uint32][]state.RestartContainer), faultCounts: make(map[faultProcess]int)}
 	var devices []uint32
 	if saved != nil {
 		for _, c := range saved.Containers {
@@ -110,6 +121,7 @@ func (r *recoveryRunner) repair(ctx context.Context, pid uint32, c state.Restart
 		devices = append(devices, recovery.Device{Major: dev >> 20, Minor: dev & ((1 << 20) - 1)})
 	}
 	r.attempts++
+	started := time.Now()
 	targetNS, targetErr := os.Stat(fmt.Sprintf("/proc/%d/ns/mnt", pid))
 	outerNS, outerErr := os.Stat(fmt.Sprintf("/proc/%d/ns/mnt", c.PID))
 	sameNamespace := targetErr == nil && outerErr == nil && os.SameFile(targetNS, outerNS)
@@ -125,11 +137,11 @@ func (r *recoveryRunner) repair(ctx context.Context, pid uint32, c state.Restart
 			return repairFailed
 		}
 		r.failed++
-		logrus.WithError(err).WithField("container", c.ID).WithField("pid", pid).Error("FUSE recovery incomplete")
+		logrus.WithError(err).WithField("container", c.ID).WithField("pid", pid).WithField("duration_ms", time.Since(started).Milliseconds()).Error("FUSE recovery incomplete")
 		return repairFailed
 	} else if len(paths) > 0 {
 		r.succeeded++
-		logrus.WithField("container", c.ID).WithField("pid", pid).Info("FUSE mounts recovered; reopen stale descriptors")
+		logrus.WithField("container", c.ID).WithField("pid", pid).WithField("duration_ms", time.Since(started).Milliseconds()).Info("FUSE mounts recovered; reopen stale descriptors")
 		return repairReplaced
 	} else {
 		r.stale++
@@ -139,8 +151,7 @@ func (r *recoveryRunner) repair(ctx context.Context, pid uint32, c state.Restart
 
 func (r *recoveryRunner) run(ctx context.Context) error {
 	go func() { <-ctx.Done(); r.events.Close() }()
-	// The minute fallback checks only registered outer mounts. Nested namespaces
-	// are discovered from fault events, never by scanning all host processes.
+	// The minute fallback inspects only registered containers and their cgroups.
 	go func() {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
@@ -149,6 +160,9 @@ func (r *recoveryRunner) run(ctx context.Context) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				r.mu.Lock()
+				r.faultCounts = make(map[faultProcess]int)
+				r.mu.Unlock()
 				seen := make(map[string]bool)
 				for _, owners := range r.records {
 					for _, c := range owners {
@@ -156,11 +170,12 @@ func (r *recoveryRunner) run(ctx context.Context) error {
 							continue
 						}
 						seen[c.ID] = true
-						if _, done := r.fallbackDone.Load(c.ID); done {
-							continue
-						}
 						start, err := state.ProcessStartTime(c.PID)
 						if err != nil || start != c.StartTime {
+							continue
+						}
+						r.repairSilentNamespaces(ctx, c)
+						if _, done := r.fallbackDone.Load(c.ID); done {
 							continue
 						}
 						// Only checkpointed, disconnected devices are eligible. Inspect
@@ -184,6 +199,14 @@ func (r *recoveryRunner) run(ctx context.Context) error {
 			}
 			return fmt.Errorf("FUSE fault event stream stopped: %w", err)
 		}
+		r.mu.Lock()
+		process := faultProcess{fault.PID, fault.Namespace, fault.Device}
+		r.faultCounts[process]++
+		frequent := r.faultCounts[process] == frequentFaultThreshold
+		r.mu.Unlock()
+		if frequent {
+			logrus.WithFields(logrus.Fields{"pid": fault.PID, "namespace": fault.Namespace, "device": fault.Device}).Warn("frequent stale FUSE reads; process must reopen old descriptors")
+		}
 		key := struct {
 			namespace uint64
 			device    uint32
@@ -202,6 +225,36 @@ func (r *recoveryRunner) run(ctx context.Context) error {
 			if result == repairReplaced || result == repairUnchanged && len(owners) == 1 {
 				r.repaired.Store(key, struct{}{})
 				break
+			}
+		}
+	}
+}
+
+func (r *recoveryRunner) repairSilentNamespaces(ctx context.Context, c state.RestartContainer) {
+	root, err := containerCgroupRoot(c.PID)
+	if err != nil {
+		return
+	}
+	namespaces, err := findContainerNamespaces(ctx, root)
+	if err != nil {
+		logrus.WithError(err).WithField("container", c.ID).Warn("FUSE namespace fallback scan failed")
+		return
+	}
+	var outer unix.Stat_t
+	if unix.Stat(fmt.Sprintf("/proc/%d/ns/mnt", c.PID), &outer) != nil {
+		return
+	}
+	for namespace, pid := range namespaces {
+		if namespace != outer.Ino {
+			key := struct {
+				container string
+				namespace uint64
+			}{c.ID, namespace}
+			if _, done := r.silentDone.Load(key); done {
+				continue
+			}
+			if r.repair(ctx, pid, c, c.Devices) != repairFailed {
+				r.silentDone.Store(key, struct{}{})
 			}
 		}
 	}

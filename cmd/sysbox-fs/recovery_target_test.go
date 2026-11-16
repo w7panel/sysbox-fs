@@ -58,6 +58,10 @@ func TestNamespaceSearchStaysInContainerCgroup(t *testing.T) {
 	if err != nil || pid != uint32(os.Getpid()) {
 		t.Fatalf("pid=%d err=%v", pid, err)
 	}
+	namespaces, err := findContainerNamespaces(context.Background(), root)
+	if err != nil || len(namespaces) != 1 || namespaces[ns.Ino] != uint32(os.Getpid()) {
+		t.Fatalf("namespaces=%v err=%v", namespaces, err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := findNamespaceProcess(ctx, root, ns.Ino); err != context.Canceled {
