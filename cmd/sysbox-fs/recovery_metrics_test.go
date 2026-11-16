@@ -8,11 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRecoveryMetricsSocket(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "metrics.sock")
-	r := &recoveryRunner{attempts: 3, succeeded: 2, failed: 1, faultEvents: 4, frequentFaults: 1}
+	r := &recoveryRunner{attempts: 3, succeeded: 2, failed: 1, faultEvents: 4, frequentFaults: 1, duration: 1500 * time.Millisecond}
 	stop, err := r.serveMetrics(path)
 	if err != nil {
 		t.Fatal(err)
@@ -35,6 +36,7 @@ func TestRecoveryMetricsSocket(t *testing.T) {
 		"sysbox_fs_recovery_failures_total 1\n",
 		"sysbox_fs_recovery_fault_events_total 4\n",
 		"sysbox_fs_recovery_frequent_fault_processes_total 1\n",
+		"sysbox_fs_recovery_duration_seconds_sum 1.500000000\n",
 	} {
 		if !strings.Contains(string(body), line) {
 			t.Fatalf("missing %q in %q", line, body)

@@ -37,6 +37,7 @@ type recoveryRunner struct {
 	silentDone                                  sync.Map
 	attempts, succeeded, failed, stale, skipped uint64
 	faultEvents, frequentFaults                 uint64
+	duration                                    time.Duration
 	faultCounts                                 map[faultProcess]int
 }
 
@@ -127,6 +128,7 @@ func (r *recoveryRunner) repair(ctx context.Context, pid uint32, c state.Restart
 	}
 	r.attempts++
 	started := time.Now()
+	defer func() { r.duration += time.Since(started) }()
 	targetNS, targetErr := os.Stat(fmt.Sprintf("/proc/%d/ns/mnt", pid))
 	outerNS, outerErr := os.Stat(fmt.Sprintf("/proc/%d/ns/mnt", c.PID))
 	sameNamespace := targetErr == nil && outerErr == nil && os.SameFile(targetNS, outerNS)
@@ -281,6 +283,7 @@ func (r *recoveryRunner) metrics(w http.ResponseWriter, req *http.Request) {
 	}
 	r.mu.Lock()
 	values := [7]uint64{r.attempts, r.succeeded, r.failed, r.stale, r.skipped, r.faultEvents, r.frequentFaults}
+	duration := r.duration
 	r.mu.Unlock()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	for i, name := range [...]string{
@@ -289,6 +292,7 @@ func (r *recoveryRunner) metrics(w http.ResponseWriter, req *http.Request) {
 	} {
 		fmt.Fprintf(w, "sysbox_fs_%s_total %d\n", name, values[i])
 	}
+	fmt.Fprintf(w, "sysbox_fs_recovery_duration_seconds_sum %.9f\n", duration.Seconds())
 }
 
 func (r *recoveryRunner) serveMetrics(path string) (func(), error) {
