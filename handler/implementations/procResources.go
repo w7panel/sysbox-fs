@@ -625,7 +625,7 @@ func countCPURange(s string) int {
 }
 
 func hostCPUCount() int {
-	data, err := os.ReadFile("/proc/cpuinfo")
+	data, err := cachedHostFile("/proc/cpuinfo")
 	if err != nil {
 		return 1
 	}
