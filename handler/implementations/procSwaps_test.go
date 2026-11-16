@@ -19,6 +19,8 @@ package implementations
 import (
 	"strings"
 	"testing"
+
+	"github.com/nestybox/sysbox-fs/domain"
 )
 
 func TestProcSwapsHeader(t *testing.T) {
@@ -32,5 +34,29 @@ func TestProcSwapsVirtualLineFormat(t *testing.T) {
 	line := formatProcSwapsVirtualLine(swapInfo{totalKB: 1024, usedKB: 128})
 	if !strings.HasPrefix(line, "none") || !strings.Contains(line, "virtual\t\t1024\t128\t0\n") {
 		t.Fatalf("formatProcSwapsVirtualLine() = %q", line)
+	}
+}
+
+func TestProcSwapsSplitReadKeepsSnapshot(t *testing.T) {
+	h := &ProcSwaps{}
+	owner := &domain.ResourceOwner{ID: 42}
+	req := &domain.HandlerRequest{Pid: ^uint32(0), ResourceOwner: owner, Data: make([]byte, 12)}
+	want := string(procSwapsData(req))
+	n, err := h.readSwaps(nil, req)
+	if err != nil || string(req.Data[:n]) != want[:12] {
+		t.Fatalf("first read: %q, %v", req.Data[:n], err)
+	}
+	original := swapsHeader
+	swapsHeader = "changed"
+	defer func() { swapsHeader = original }()
+	req.Offset = int64(n)
+	req.Data = make([]byte, len(want))
+	n, err = h.readSwaps(nil, req)
+	if err != nil || string(req.Data[:n]) != want[12:] {
+		t.Fatalf("continued read: %q, %v", req.Data[:n], err)
+	}
+	h.ReleaseResourceSnapshots(resourceOwnerKey(req))
+	if len(h.snapshots.entries) != 0 {
+		t.Fatal("swaps snapshot survived owner release")
 	}
 }

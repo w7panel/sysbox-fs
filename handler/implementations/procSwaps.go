@@ -40,10 +40,11 @@ var swapsHeader = "Filename                                Type            Size 
 
 type ProcSwaps struct {
 	domain.HandlerBase
+	snapshots byteSnapshots
 }
 
 var ProcSwaps_Handler = &ProcSwaps{
-	domain.HandlerBase{
+	HandlerBase: domain.HandlerBase{
 		Name:    "ProcSwaps",
 		Path:    "/proc/swaps",
 		Enabled: true,
@@ -185,13 +186,23 @@ func (h *ProcSwaps) readSwaps(
 
 	logrus.Debugf("Executing %v Read() method", h.Name)
 
-	data := procSwapsData(req)
+	data, err := h.snapshots.get(resourceViewKey(req), resourceOwnerKey(req), req.ResourceOwner,
+		req.Offset > 0, time.Now(), resourceCacheTTL(req, resourceSnapshotTTL), func() ([]byte, error) {
+			return procSwapsData(req), nil
+		})
+	if err != nil {
+		return 0, err
+	}
 	if req.Offset >= int64(len(data)) {
 		return 0, io.EOF
 	}
 
 	copied := copy(req.Data, data[req.Offset:])
 	return copied, nil
+}
+
+func (h *ProcSwaps) ReleaseResourceSnapshots(owner string) {
+	h.snapshots.release(owner)
 }
 
 func procSwapsData(req *domain.HandlerRequest) []byte {
