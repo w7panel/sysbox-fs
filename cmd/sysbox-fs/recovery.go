@@ -38,6 +38,8 @@ type recoveryRunner struct {
 	attempts, succeeded, failed, stale, skipped uint64
 	faultEvents, frequentFaults                 uint64
 	duration                                    time.Duration
+	durationCount                               uint64
+	durationBuckets                             [len(recoveryDurationBounds)]uint64
 	faultCounts                                 map[faultProcess]int
 }
 
@@ -48,6 +50,21 @@ type faultProcess struct {
 }
 
 const frequentFaultThreshold = 5
+
+var recoveryDurationBounds = [...]time.Duration{
+	10 * time.Millisecond, 50 * time.Millisecond, 100 * time.Millisecond,
+	250 * time.Millisecond, 500 * time.Millisecond, time.Second, 5 * time.Second,
+}
+
+func (r *recoveryRunner) observeDuration(elapsed time.Duration) {
+	r.duration += elapsed
+	r.durationCount++
+	for i, bound := range recoveryDurationBounds {
+		if elapsed <= bound {
+			r.durationBuckets[i]++
+		}
+	}
+}
 
 type repairResult int
 
@@ -128,7 +145,7 @@ func (r *recoveryRunner) repair(ctx context.Context, pid uint32, c state.Restart
 	}
 	r.attempts++
 	started := time.Now()
-	defer func() { r.duration += time.Since(started) }()
+	defer func() { r.observeDuration(time.Since(started)) }()
 	targetNS, targetErr := os.Stat(fmt.Sprintf("/proc/%d/ns/mnt", pid))
 	outerNS, outerErr := os.Stat(fmt.Sprintf("/proc/%d/ns/mnt", c.PID))
 	sameNamespace := targetErr == nil && outerErr == nil && os.SameFile(targetNS, outerNS)
@@ -284,6 +301,8 @@ func (r *recoveryRunner) metrics(w http.ResponseWriter, req *http.Request) {
 	r.mu.Lock()
 	values := [7]uint64{r.attempts, r.succeeded, r.failed, r.stale, r.skipped, r.faultEvents, r.frequentFaults}
 	duration := r.duration
+	durationCount := r.durationCount
+	durationBuckets := r.durationBuckets
 	r.mu.Unlock()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	for i, name := range [...]string{
@@ -292,7 +311,13 @@ func (r *recoveryRunner) metrics(w http.ResponseWriter, req *http.Request) {
 	} {
 		fmt.Fprintf(w, "sysbox_fs_%s_total %d\n", name, values[i])
 	}
+	fmt.Fprintln(w, "# TYPE sysbox_fs_recovery_duration_seconds histogram")
+	for i, bound := range recoveryDurationBounds {
+		fmt.Fprintf(w, "sysbox_fs_recovery_duration_seconds_bucket{le=\"%g\"} %d\n", bound.Seconds(), durationBuckets[i])
+	}
+	fmt.Fprintf(w, "sysbox_fs_recovery_duration_seconds_bucket{le=\"+Inf\"} %d\n", durationCount)
 	fmt.Fprintf(w, "sysbox_fs_recovery_duration_seconds_sum %.9f\n", duration.Seconds())
+	fmt.Fprintf(w, "sysbox_fs_recovery_duration_seconds_count %d\n", durationCount)
 }
 
 func (r *recoveryRunner) serveMetrics(path string) (func(), error) {
