@@ -115,13 +115,14 @@ func (d *Dir) Lookup(
 	}
 
 	handlerReq := &domain.HandlerRequest{
-		ID:        uint64(req.ID),
-		Name:      req.Name,
-		Path:      path,
-		Pid:       req.Pid,
-		Uid:       req.Uid,
-		Gid:       req.Gid,
-		Container: d.server.container,
+		ID:            uint64(req.ID),
+		Name:          req.Name,
+		Path:          path,
+		Pid:           req.Pid,
+		Uid:           req.Uid,
+		Gid:           req.Gid,
+		Container:     d.server.container,
+		ResourceOwner: d.server.resourceOwner,
 	}
 
 	// Handler execution.
@@ -228,13 +229,14 @@ func (d *Dir) Create(
 	}
 
 	handlerReq := &domain.HandlerRequest{
-		ID:        uint64(req.ID),
-		Name:      req.Name,
-		Path:      path,
-		Pid:       req.Pid,
-		Uid:       req.Uid,
-		Gid:       req.Gid,
-		Container: d.server.container,
+		ID:            uint64(req.ID),
+		Name:          req.Name,
+		Path:          path,
+		Pid:           req.Pid,
+		Uid:           req.Uid,
+		Gid:           req.Gid,
+		Container:     d.server.container,
+		ResourceOwner: d.server.resourceOwner,
 	}
 
 	// Handler execution. 'Open' handler will create new element if requesting
@@ -301,11 +303,12 @@ func (d *Dir) ReadDirAll(ctx context.Context, req *fuse.ReadRequest) ([]fuse.Dir
 	}
 
 	handlerReq := &domain.HandlerRequest{
-		ID:        uint64(req.ID),
-		Pid:       req.Pid,
-		Uid:       req.Uid,
-		Gid:       req.Gid,
-		Container: d.server.container,
+		ID:            uint64(req.ID),
+		Pid:           req.Pid,
+		Uid:           req.Uid,
+		Gid:           req.Gid,
+		Container:     d.server.container,
+		ResourceOwner: d.server.resourceOwner,
 	}
 
 	// Handler execution.

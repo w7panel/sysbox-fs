@@ -75,6 +75,8 @@ var DefaultHandlers = []domain.HandlerIface{
 }
 
 type handlerService struct {
+	resourceMu     sync.Mutex
+	resourceOwners map[domain.ContainerIface]*resourceOwnerRef
 	sync.RWMutex
 
 	// Radix-tree indexed by node FS path. Tree serves as an ordered DB where to

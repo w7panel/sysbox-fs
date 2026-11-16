@@ -27,6 +27,7 @@ import (
 
 	"github.com/nestybox/sysbox-fs/domain"
 	"github.com/nestybox/sysbox-fs/fuse"
+	"github.com/nestybox/sysbox-fs/recovery"
 
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
@@ -65,11 +66,17 @@ func (h *PassThrough) Lookup(
 		req.ID, h.Name, n.Name())
 
 	mountSysfs, mountProcfs, cloneFlags := checkProcAndSysRemount(n)
+	requestPID := req.Pid
+	// The recovery helper's private mount namespace cannot launch the nsenter
+	// agent; use the registered init's namespaces to resolve replacement paths.
+	if recovery.IsMountHelperPID(req.Pid) {
+		requestPID = req.Container.InitPid()
+	}
 
 	// Create nsenterEvent to initiate interaction with container namespaces.
 	nss := h.Service.NSenterService()
 	event := nss.NewEvent(
-		req.Pid,
+		requestPID,
 		req.Uid,
 		req.Gid,
 		&domain.AllNSs,
@@ -195,6 +202,19 @@ func (h *PassThrough) ReadWithNS(
 		req.ID, h.Name, n.Name())
 
 	path := n.Path()
+	// These read-only UTS values are shared by all namespaces. Do not include
+	// writable, namespace-specific values such as hostname or domainname.
+	switch path {
+	case "/proc/sys/kernel/ostype", "/proc/sys/kernel/osrelease", "/proc/sys/kernel/version":
+		data, err := cachedHostFile(path)
+		if err != nil {
+			return 0, err
+		}
+		if req.Offset >= int64(len(data)) {
+			return 0, io.EOF
+		}
+		return copy(req.Data, data[req.Offset:]), nil
+	}
 	cntr := req.Container
 
 	prs := h.Service.ProcessService()

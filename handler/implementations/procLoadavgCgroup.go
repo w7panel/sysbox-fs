@@ -25,8 +25,12 @@ import (
 
 func pruneInitScopeCgroup(cg cgroupView) cgroupView {
 	cg.v2Path = pruneInitScopePath(cg.v2Path)
-	for ctrl, path := range cg.v1 {
-		cg.v1[ctrl] = pruneInitScopePath(path)
+	if len(cg.v1) > 0 {
+		paths := make(map[string]string, len(cg.v1))
+		for ctrl, path := range cg.v1 {
+			paths[ctrl] = pruneInitScopePath(path)
+		}
+		cg.v1 = paths
 	}
 	return cg
 }

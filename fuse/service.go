@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	bfuse "bazil.org/fuse"
 	_ "bazil.org/fuse/fs/fstestutil"
 
 	"github.com/nestybox/sysbox-fs/domain"
@@ -29,6 +30,8 @@ import (
 )
 
 type FuseServerService struct {
+	stateIO      sync.RWMutex
+	quiesced     bool
 	sync.RWMutex                                   // servers map protection
 	path         string                            // fs path to emulate -- "/" by default
 	mountPoint   string                            // base mountpoint -- "/var/lib/sysboxfs" by default
@@ -115,6 +118,15 @@ func (fss *FuseServerService) CreateFuseServer(serveCntr, stateCntr domain.Conta
 		fss,
 	)
 
+	srv.(*fuseServer).resourceOwner = fss.hds.AcquireResourceOwner(stateCntr)
+	srv.(*fuseServer).cachePolicy, _ = serveCntr.(domain.ResourceCachePolicyContainer)
+	initialized := false
+	defer func() {
+		if !initialized {
+			fss.releaseResourceOwner(srv.(*fuseServer))
+		}
+	}()
+
 	// Create new fuse-server.
 	if err := srv.Create(); err != nil {
 		return errors.New("FuseServer initialization error")
@@ -130,6 +142,7 @@ func (fss *FuseServerService) CreateFuseServer(serveCntr, stateCntr domain.Conta
 	// Store newly created fuse-server.
 	fss.Lock()
 	fss.serversMap[cntrId] = srv.(*fuseServer)
+	initialized = true
 	fss.Unlock()
 
 	logrus.Debugf("Created fuse server for container %s", cntrId)
@@ -161,6 +174,8 @@ func (fss *FuseServerService) DestroyFuseServer(cntrId string) error {
 			cntrId)
 		return nil
 	}
+
+	fss.releaseResourceOwner(srv)
 
 	// Remove mountpoint dir from host file-system.
 	cntrMountpoint := filepath.Join(fss.mountPoint, cntrId)
@@ -197,5 +212,43 @@ func (fss *FuseServerService) FuseServerCntrRegComplete(cntr domain.ContainerIfa
 
 	srv.SetCntrRegComplete()
 
+	return nil
+}
+
+func (fss *FuseServerService) releaseResourceOwner(srv *fuseServer) {
+	srv.resourceRelease.Do(func() { fss.hds.ReleaseResourceOwner(srv.resourceOwner) })
+}
+
+// StateContainer returns the shared emulation state for a graceful checkpoint.
+func (fss *FuseServerService) StateContainer(id string) domain.ContainerIface {
+	fss.RLock()
+	defer fss.RUnlock()
+	if srv := fss.serversMap[id]; srv != nil {
+		return srv.container
+	}
+	return nil
+}
+
+// Quiesce drains handlers which read or change the emulated data store.
+// Attribute lookups remain available while the restart checkpoint records devices.
+func (fss *FuseServerService) Quiesce() {
+	fss.stateIO.Lock()
+	fss.quiesced = true
+	fss.stateIO.Unlock()
+}
+
+// DetachForRestart removes host mountpoints without clearing objects that
+// surviving container mounts can still reference until this process exits.
+func (fss *FuseServerService) DetachForRestart() error {
+	fss.RLock()
+	defer fss.RUnlock()
+	for _, server := range fss.serversMap {
+		if err := bfuse.Unmount(server.mountPoint); err != nil {
+			return err
+		}
+		if err := os.Remove(server.mountPoint); err != nil {
+			return err
+		}
+	}
 	return nil
 }

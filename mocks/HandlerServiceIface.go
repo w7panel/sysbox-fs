@@ -415,3 +415,15 @@ func NewHandlerServiceIface(t interface {
 
 	return mock
 }
+
+func (_m *HandlerServiceIface) AcquireResourceOwner(c domain.ContainerIface) *domain.ResourceOwner {
+	ret := _m.Called(c)
+	if fn, ok := ret.Get(0).(func(domain.ContainerIface) *domain.ResourceOwner); ok {
+		return fn(c)
+	}
+	if ret.Get(0) == nil {
+		return nil
+	}
+	return ret.Get(0).(*domain.ResourceOwner)
+}
+func (_m *HandlerServiceIface) ReleaseResourceOwner(owner *domain.ResourceOwner) { _m.Called(owner) }

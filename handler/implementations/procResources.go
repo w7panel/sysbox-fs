@@ -42,7 +42,6 @@ const (
 	resourceSnapshotTTL         = 200 * time.Millisecond
 	procStatStateStaleAfter     = 5 * time.Minute
 	loadavgSampleInterval       = 5 * time.Second
-	loadavgStaleAfter           = 5 * time.Minute
 	loadavgCgroupDepth          = 3
 	loadavgFShift               = uint64(11)
 	loadavgFixed1               = uint64(1) << loadavgFShift
@@ -54,13 +53,7 @@ const (
 type readOnlyResource struct {
 	domain.HandlerBase
 	read      resourceReader
-	snapshots map[string]resourceSnapshot
-	mu        sync.Mutex
-}
-
-type resourceSnapshot struct {
-	data      []byte
-	createdAt time.Time
+	snapshots byteSnapshots
 }
 
 type SysinfoMemory struct {
@@ -73,6 +66,7 @@ type SysinfoMemory struct {
 }
 
 type procStatState struct {
+	owner       string
 	mu          sync.Mutex
 	initialized bool
 	lastSeen    time.Time
@@ -108,8 +102,7 @@ func newReadOnlyResource(name, path string, read resourceReader) *readOnlyResour
 				},
 			},
 		},
-		read:      read,
-		snapshots: make(map[string]resourceSnapshot),
+		read: read,
 	}
 }
 
@@ -170,57 +163,12 @@ func (h *readOnlyResource) Read(n domain.IOnodeIface, req *domain.HandlerRequest
 }
 
 func (h *readOnlyResource) snapshotData(req *domain.HandlerRequest) ([]byte, error) {
-	key := h.snapshotKey(req)
-	now := time.Now()
-
-	h.mu.Lock()
-	protectedKey := ""
-	if req.Offset > 0 {
-		protectedKey = key
-	}
-	h.pruneExpiredSnapshots(now, protectedKey)
-	if snapshot, ok := h.snapshots[key]; ok && (req.Offset > 0 || now.Sub(snapshot.createdAt) < resourceSnapshotTTL) {
-		data := snapshot.data
-		h.mu.Unlock()
-		return data, nil
-	}
-	h.mu.Unlock()
-
-	data, err := h.read(req)
-	if err != nil {
-		return nil, err
-	}
-
-	h.mu.Lock()
-	h.snapshots[key] = resourceSnapshot{
-		data:      data,
-		createdAt: now,
-	}
-	h.mu.Unlock()
-
-	return data, nil
+	return h.snapshots.get(resourceViewKey(req), resourceOwnerKey(req), req.ResourceOwner,
+		req.Offset > 0, time.Now(), resourceCacheTTL(req, resourceSnapshotTTL), func() ([]byte, error) { return h.read(req) })
 }
 
-func (h *readOnlyResource) pruneExpiredSnapshots(now time.Time, protectedKey string) {
-	for key, snapshot := range h.snapshots {
-		if key == protectedKey {
-			continue
-		}
-		if now.Sub(snapshot.createdAt) >= resourceSnapshotTTL {
-			delete(h.snapshots, key)
-		}
-	}
-}
-
-func (h *readOnlyResource) snapshotKey(req *domain.HandlerRequest) string {
-	id := ""
-	if req.Container != nil {
-		id = req.Container.ID()
-	}
-	if id == "" {
-		id = fmt.Sprintf("pid:%d", req.Pid)
-	}
-	return h.Path + ":" + id
+func (h *readOnlyResource) ReleaseResourceSnapshots(owner string) {
+	h.snapshots.release(owner)
 }
 
 func (h *readOnlyResource) Write(n domain.IOnodeIface, req *domain.HandlerRequest) (int, error) {
@@ -278,7 +226,7 @@ type cgroupView struct {
 
 func cgroupForReq(req *domain.HandlerRequest) cgroupView {
 	if req != nil && req.Pid != 0 {
-		cg := cgroupForPid(req.Pid)
+		cg := requestCgroup(req)
 		if cg.v2Path != "" || len(cg.v1) > 0 {
 			return cg
 		}
@@ -692,7 +640,7 @@ func hostCPUCount() int {
 }
 
 func readCPUInfo(req *domain.HandlerRequest) ([]byte, error) {
-	data, err := hostFile("/proc/cpuinfo")
+	data, err := cachedHostFile("/proc/cpuinfo")
 	if err != nil {
 		return nil, err
 	}
@@ -833,8 +781,8 @@ func procStatCPUView(req *domain.HandlerRequest, cpus int, fieldCount int, now t
 	}
 
 	cg := cgroupForProcStatReq(req)
-	key := procStatStateKey(req, cg)
-	state := procStatStateForKey(key, now)
+	key := resourceOwnerKey(req) + "\x00" + procStatStateKey(req, cg)
+	state := procStatStateForKey(req, key, now)
 	raw := cpuUsageFromCgroup(cg)
 
 	state.mu.Lock()
@@ -871,7 +819,7 @@ func procStatCPUView(req *domain.HandlerRequest, cpus int, fieldCount int, now t
 
 func cgroupForProcStatReq(req *domain.HandlerRequest) cgroupView {
 	if req.Pid != 0 {
-		cg := cgroupForPid(req.Pid)
+		cg := requestCgroup(req)
 		if cg.v2Path != "" || len(cg.v1) > 0 {
 			return cg
 		}
@@ -901,9 +849,13 @@ func procStatStateKey(req *domain.HandlerRequest, cg cgroupView) string {
 	return fmt.Sprintf("pid:%d", req.Pid)
 }
 
-func procStatStateForKey(key string, now time.Time) *procStatState {
+func procStatStateForKey(req *domain.HandlerRequest, key string, now time.Time) *procStatState {
 	procStatStatesMu.Lock()
 	defer procStatStatesMu.Unlock()
+
+	if req.ResourceOwner != nil && req.ResourceOwner.Closed() {
+		return &procStatState{}
+	}
 
 	for k, state := range procStatStates {
 		state.mu.Lock()
@@ -916,7 +868,7 @@ func procStatStateForKey(key string, now time.Time) *procStatState {
 
 	state, ok := procStatStates[key]
 	if !ok {
-		state = &procStatState{}
+		state = &procStatState{owner: resourceOwnerKey(req)}
 		procStatStates[key] = state
 	}
 	return state
@@ -1841,7 +1793,7 @@ func diskDeviceFromKey(key string) (diskDevice, bool) {
 }
 
 func diskstatsHostDevices() []diskDevice {
-	data, err := os.ReadFile("/proc/diskstats")
+	data, err := cachedHostFile("/proc/diskstats")
 	if err != nil {
 		return nil
 	}

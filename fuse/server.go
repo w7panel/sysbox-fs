@@ -32,19 +32,22 @@ import (
 
 // FuseServer class in charge of running/hosting sysbox-fs' FUSE server features.
 type fuseServer struct {
-	sync.RWMutex                          // nodeDB protection
-	conn         *bfuse.Conn              // Associated fuse connection
-	path         string                   // fs path to emulate -- "/" by default
-	mountPoint   string                   // mountpoint -- "/var/lib/sysboxfs" by default
-	container    domain.ContainerIface    // associated sys container
-	containerUid uint32                   // container UID for caching purposes
-	containerGid uint32                   // container GID for caching purposes
-	server       *bfusefs.Server          // bazil-fuse server instance
-	nodeDB       map[string]*bfusefs.Node // map to store all fs nodes, e.g. "/proc/uptime" -> File
-	root         *Dir                     // root node of fuse fs -- "/" by default
-	initDone     chan bool                // sync-up channel to alert about fuse-server's init-completion
-	cntrReg      bool                     // flag to track the container's registration state
-	service      *FuseServerService       // backpointer to parent service
+	cachePolicy     domain.ResourceCachePolicyContainer
+	resourceOwner   *domain.ResourceOwner
+	resourceRelease sync.Once
+	sync.RWMutex                             // nodeDB protection
+	conn            *bfuse.Conn              // Associated fuse connection
+	path            string                   // fs path to emulate -- "/" by default
+	mountPoint      string                   // mountpoint -- "/var/lib/sysboxfs" by default
+	container       domain.ContainerIface    // associated sys container
+	containerUid    uint32                   // container UID for caching purposes
+	containerGid    uint32                   // container GID for caching purposes
+	server          *bfusefs.Server          // bazil-fuse server instance
+	nodeDB          map[string]*bfusefs.Node // map to store all fs nodes, e.g. "/proc/uptime" -> File
+	root            *Dir                     // root node of fuse fs -- "/" by default
+	initDone        chan bool                // sync-up channel to alert about fuse-server's init-completion
+	cntrReg         bool                     // flag to track the container's registration state
+	service         *FuseServerService       // backpointer to parent service
 }
 
 func NewFuseServer(

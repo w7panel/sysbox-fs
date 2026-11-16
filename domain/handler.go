@@ -19,6 +19,7 @@ package domain
 import (
 	"os"
 	"sync"
+	"time"
 )
 
 // HandlerBase is a type common to all the handlers.
@@ -79,17 +80,21 @@ type EmuResource struct {
 
 // HandlerRequest represents a request to be processed by a handler
 type HandlerRequest struct {
-	ID          uint64
-	Name        string
-	Path        string
-	Pid         uint32
-	Uid         uint32
-	Gid         uint32
-	SkipIdRemap bool
-	Offset      int64
-	NoCache     bool
-	Data        []byte
-	Container   ContainerIface
+	ResourceCacheTTL time.Duration
+	resourceViewOnce sync.Once
+	resourceView     ResourceViewIdentity
+	ResourceOwner    *ResourceOwner
+	ID               uint64
+	Name             string
+	Path             string
+	Pid              uint32
+	Uid              uint32
+	Gid              uint32
+	SkipIdRemap      bool
+	Offset           int64
+	NoCache          bool
+	Data             []byte
+	Container        ContainerIface
 }
 
 // HandlerIface is the interface that each handler must implement
@@ -121,6 +126,8 @@ type PassthroughHandlerIface interface {
 }
 
 type HandlerServiceIface interface {
+	AcquireResourceOwner(ContainerIface) *ResourceOwner
+	ReleaseResourceOwner(*ResourceOwner)
 	Setup(
 		hdlrs []HandlerIface,
 		ignoreErrors bool,

@@ -13,7 +13,7 @@ SYSFS_TARGET := sysbox-fs
 SYSFS_DEBUG_TARGET := sysbox-fs-debug
 SYSFS_STATIC_TARGET := sysbox-fs-static
 SYSFS_DIR := $(CURDIR)
-SYSFS_SRC := $(shell find . 2>&1 | grep -E '.*\.(c|h|go)$$')
+SYSFS_SRC := $(shell find . 2>&1 | grep -E '.*\.(c|h|go|o)$$')
 
 SYSFS_GRPC_DIR := ../sysbox-ipc/sysboxFsGrpc
 SYSFS_GRPC_SRC := $(shell find $(SYSFS_GRPC_DIR) 2>&1 | grep -E '.*\.(c|h|go|proto)$$')

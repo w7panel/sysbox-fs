@@ -39,19 +39,9 @@ type ProcUptime struct {
 	domain.HandlerBase
 }
 
-type procUptimeSnapshot struct {
-	data      []byte
-	createdAt time.Time
-}
-
 const procUptimeSnapshotTTL = 100 * time.Millisecond
 
-var procUptimeSnapshots = struct {
-	sync.Mutex
-	entries map[string]procUptimeSnapshot
-}{
-	entries: make(map[string]procUptimeSnapshot),
-}
+var procUptimeSnapshots byteSnapshots
 
 var ProcUptime_Handler = &ProcUptime{
 	domain.HandlerBase{
@@ -213,7 +203,10 @@ func (h *ProcUptime) readUptime(
 	// The first column in /proc/uptime is uptime in seconds, while the second
 	// column is cumulative idle time across the CPUs visible to the container.
 	//
-	data := procUptimeData(req, ctime, time.Now())
+	data, err := procUptimeData(req, ctime, time.Now())
+	if err != nil {
+		return 0, err
+	}
 
 	if req.Offset >= int64(len(data)) {
 		return 0, io.EOF
@@ -223,48 +216,13 @@ func (h *ProcUptime) readUptime(
 	return copied, nil
 }
 
-func procUptimeData(req *domain.HandlerRequest, ctime, now time.Time) []byte {
-	key := procUptimeSnapshotKey(req)
-
-	procUptimeSnapshots.Lock()
-	defer procUptimeSnapshots.Unlock()
-	protectedKey := ""
-	if req.Offset > 0 {
-		protectedKey = key
-	}
-	pruneExpiredProcUptimeSnapshots(now, protectedKey)
-
-	snapshot, ok := procUptimeSnapshots.entries[key]
-	if ok && (req.Offset > 0 || now.Sub(snapshot.createdAt) < procUptimeSnapshotTTL) {
-		return snapshot.data
-	}
-
-	uptime := containerUptime(ctime, now)
-	idle := containerIdleFromReq(req, uptime)
-	data := []byte(fmt.Sprintf("%.2f %.2f\n", uptime, idle))
-	procUptimeSnapshots.entries[key] = procUptimeSnapshot{
-		data:      data,
-		createdAt: now,
-	}
-	return data
-}
-
-func pruneExpiredProcUptimeSnapshots(now time.Time, protectedKey string) {
-	for key, snapshot := range procUptimeSnapshots.entries {
-		if key == protectedKey {
-			continue
-		}
-		if now.Sub(snapshot.createdAt) >= procUptimeSnapshotTTL {
-			delete(procUptimeSnapshots.entries, key)
-		}
-	}
-}
-
-func procUptimeSnapshotKey(req *domain.HandlerRequest) string {
-	if req.Container != nil && req.Container.ID() != "" {
-		return req.Container.ID()
-	}
-	return fmt.Sprintf("pid:%d", req.Pid)
+func procUptimeData(req *domain.HandlerRequest, ctime, now time.Time) ([]byte, error) {
+	return procUptimeSnapshots.get(resourceViewKey(req), resourceOwnerKey(req), req.ResourceOwner,
+		req.Offset > 0, now, resourceCacheTTL(req, procUptimeSnapshotTTL), func() ([]byte, error) {
+			uptime := containerUptime(ctime, now)
+			idle := containerIdleFromReq(req, uptime)
+			return []byte(fmt.Sprintf("%.2f %.2f\n", uptime, idle)), nil
+		})
 }
 
 func containerUptime(ctime, now time.Time) float64 {

@@ -136,11 +136,12 @@ func (f *File) Open(
 	}
 
 	handlerReq := &domain.HandlerRequest{
-		ID:        uint64(req.ID),
-		Pid:       req.Pid,
-		Uid:       req.Uid,
-		Gid:       req.Gid,
-		Container: f.server.container,
+		ID:            uint64(req.ID),
+		Pid:           req.Pid,
+		Uid:           req.Uid,
+		Gid:           req.Gid,
+		Container:     f.server.container,
+		ResourceOwner: f.server.resourceOwner,
 	}
 
 	// Handler execution.
@@ -209,6 +210,11 @@ func (f *File) Read(
 	ctx context.Context,
 	req *fuse.ReadRequest,
 	resp *fuse.ReadResponse) error {
+	f.server.service.stateIO.RLock()
+	defer f.server.service.stateIO.RUnlock()
+	if f.server.service.quiesced {
+		return syscall.ENOTCONN
+	}
 
 	logrus.Debugf("Requested Read() operation for entry %v (Req ID=%#v)",
 		f.path, uint64(req.ID))
@@ -231,13 +237,18 @@ func (f *File) Read(
 	}
 
 	handlerReq := &domain.HandlerRequest{
-		ID:        uint64(req.ID),
-		Pid:       req.Pid,
-		Uid:       req.Uid,
-		Gid:       req.Gid,
-		Offset:    req.Offset,
-		Data:      make([]byte, req.Size),
-		Container: f.server.container,
+		ID:            uint64(req.ID),
+		Pid:           req.Pid,
+		Uid:           req.Uid,
+		Gid:           req.Gid,
+		Offset:        req.Offset,
+		Data:          make([]byte, req.Size),
+		Container:     f.server.container,
+		ResourceOwner: f.server.resourceOwner,
+	}
+
+	if f.server.cachePolicy != nil {
+		handlerReq.ResourceCacheTTL = f.server.cachePolicy.ResourceCacheTTL()
 	}
 
 	// Handler execution.
@@ -256,6 +267,11 @@ func (f *File) Write(
 	ctx context.Context,
 	req *fuse.WriteRequest,
 	resp *fuse.WriteResponse) error {
+	f.server.service.stateIO.RLock()
+	defer f.server.service.stateIO.RUnlock()
+	if f.server.service.quiesced {
+		return syscall.ENOTCONN
+	}
 
 	logrus.Debugf("Requested Write() operation for entry %v (Req ID=%#v)",
 		f.path, uint64(req.ID))
@@ -278,12 +294,13 @@ func (f *File) Write(
 	}
 
 	request := &domain.HandlerRequest{
-		ID:        uint64(req.ID),
-		Pid:       req.Pid,
-		Uid:       req.Uid,
-		Gid:       req.Gid,
-		Data:      req.Data,
-		Container: f.server.container,
+		ID:            uint64(req.ID),
+		Pid:           req.Pid,
+		Uid:           req.Uid,
+		Gid:           req.Gid,
+		Data:          req.Data,
+		Container:     f.server.container,
+		ResourceOwner: f.server.resourceOwner,
 	}
 
 	// Handler execution.
@@ -320,11 +337,12 @@ func (f *File) Readlink(
 	}
 
 	request := &domain.HandlerRequest{
-		ID:        uint64(req.ID),
-		Pid:       req.Pid,
-		Uid:       req.Uid,
-		Gid:       req.Gid,
-		Container: f.server.container,
+		ID:            uint64(req.ID),
+		Pid:           req.Pid,
+		Uid:           req.Uid,
+		Gid:           req.Gid,
+		Container:     f.server.container,
+		ResourceOwner: f.server.resourceOwner,
 	}
 
 	// Handler execution.

@@ -73,6 +73,8 @@ var monitoredSyscalls = []string{
 // Seccomp's syscall-monitoring/trapping service struct. External packages
 // will solely rely on this struct for their syscall-monitoring demands.
 type SyscallMonitorService struct {
+	fdStore                *fdStore
+	inheritedListeners     []int
 	nss                    domain.NSenterServiceIface        // for nsenter functionality requirements
 	css                    domain.ContainerStateServiceIface // for container-state interactions
 	prs                    domain.ProcessServiceIface        // for process class interactions
@@ -132,6 +134,8 @@ type seccompSession struct {
 
 // Seccomp's syscall-monitor/tracer.
 type syscallTracer struct {
+	recoveryMu         sync.RWMutex
+	quiescing          bool
 	srv                *unixIpc.Server                   // unix server listening to seccomp-notifs
 	pollsrv            *unixIpc.PollServer               // unix pollserver for non-blocking i/o on seccomp-fd
 	syscalls           map[seccompArchSyscallPair]string // hashmap of supported syscalls, indexed by seccomp architecture and syscall id
@@ -253,14 +257,16 @@ func (t *syscallTracer) seccompSessionAdd(s seccompSession) {
 	if t.service.closeSeccompOnContExit {
 
 		// Return if seccomp session's pid is already registered.
-		if _, ok := t.pidToContMap[s.pid]; ok {
+		if _, ok := t.pidToContMap[s.pid]; s.pid != 0 && ok {
 			t.seccompSessionMu.Unlock()
 			return
 		}
 
 		// Collect seccomp fds associated with container so we can
 		// release them together when the container dies.
-		t.pidToContMap[s.pid] = s.cntrId
+		if s.pid != 0 {
+			t.pidToContMap[s.pid] = s.cntrId
+		}
 		sessions, ok := t.seccompSessionCMap[s.cntrId]
 		if ok {
 			sessions = append(sessions, s)
@@ -314,6 +320,11 @@ func (t *syscallTracer) seccompSessionDelete(s seccompSession) {
 
 	if len(closeFds) > 0 {
 		for _, fd := range closeFds {
+			if t.service.fdStore != nil {
+				if err := t.service.fdStore.remove(int(fd)); err != nil {
+					logrus.Errorf("Remove seccomp listener from systemd: %v", err)
+				}
+			}
 			// We are finally ready to close the seccomp-fd.
 			if err := unix.Close(int(fd)); err != nil {
 				logrus.Errorf("Failed to close seccomp fd %v for pid %d: %v",
@@ -376,6 +387,7 @@ func (t *syscallTracer) seccompSessionPidfd(
 // Tracer's connection-handler method. Executed within a dedicated goroutine (one
 // per connection).
 func (t *syscallTracer) connHandler(c *net.UnixConn) {
+	defer c.Close()
 
 	// Obtain seccomp-notification's file-descriptor and associated context.
 	pid, cntrID, fd, err := unixIpc.RecvSeccompInitMsg(c)
@@ -383,8 +395,33 @@ func (t *syscallTracer) connHandler(c *net.UnixConn) {
 		return
 	}
 
+	t.recoveryMu.RLock()
+	if t.quiescing {
+		t.recoveryMu.RUnlock()
+		unix.Close(int(fd))
+		return
+	}
+	if t.service.fdStore != nil {
+		if err := t.retainListener(uint32(pid), cntrID, int(fd)); err != nil {
+			t.recoveryMu.RUnlock()
+			logrus.Errorf("Cannot retain seccomp listener for %s: %v", cntrID, err)
+			if removeErr := t.service.fdStore.remove(int(fd)); removeErr != nil {
+				logrus.Errorf("Remove uncertain seccomp listener: %v", removeErr)
+			}
+			unix.Close(int(fd))
+			return
+		}
+	}
+
 	// Send Ack message back to sysbox-runc.
 	if err = unixIpc.SendSeccompInitAckMsg(c); err != nil {
+		t.recoveryMu.RUnlock()
+		if t.service.fdStore != nil {
+			if removeErr := t.service.fdStore.remove(int(fd)); removeErr != nil {
+				logrus.Errorf("Remove rejected seccomp listener: %v", removeErr)
+			}
+		}
+		unix.Close(int(fd))
 		return
 	}
 
@@ -394,7 +431,12 @@ func (t *syscallTracer) connHandler(c *net.UnixConn) {
 	// Register the new seccomp-fd session.
 	session := seccompSession{uint32(pid), fd, int32(pidfd), cntrID}
 	t.seccompSessionAdd(session)
+	t.recoveryMu.RUnlock()
+	t.pollSession(session)
+}
 
+func (t *syscallTracer) pollSession(session seccompSession) {
+	pid, cntrID, fd, pidfd := session.pid, session.cntrId, session.fd, session.pidfd
 	for {
 		var fds []unix.PollFd
 
@@ -444,7 +486,15 @@ func (t *syscallTracer) connHandler(c *net.UnixConn) {
 		// Retrieves seccomp-notification message. Notice that we will not 'break'
 		// upon error detection as libseccomp/kernel could return non-fatal errors
 		// (i.e., ENOENT) to alert of a problem with a specific notification.
+		t.recoveryMu.RLock()
+		if t.quiescing {
+			t.recoveryMu.RUnlock()
+			return
+		}
 		req, err := libseccomp.NotifReceive(libseccomp.ScmpFd(fd))
+		if err != nil {
+			t.recoveryMu.RUnlock()
+		}
 		if err != nil {
 			if isStaleSeccompNotification(err) {
 				logrus.Debugf("Ignoring stale seccomp notification on fd %d, pid %d, cntr %s: %v",
@@ -458,11 +508,11 @@ func (t *syscallTracer) connHandler(c *net.UnixConn) {
 
 		// Process the incoming syscall and obtain response for seccomp-tracee.
 		t.seccompNotifSched.Schedule(req, fd, cntrID, t.process)
+		t.recoveryMu.RUnlock()
 	}
 
 	t.seccompSessionDelete(session)
 
-	c.Close()
 }
 
 func isStaleSeccompNotification(err error) bool {

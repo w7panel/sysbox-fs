@@ -17,6 +17,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -30,10 +31,12 @@ import (
 	"github.com/nestybox/sysbox-fs/domain"
 	"github.com/nestybox/sysbox-fs/fuse"
 	"github.com/nestybox/sysbox-fs/handler"
+	"github.com/nestybox/sysbox-fs/handler/implementations"
 	"github.com/nestybox/sysbox-fs/ipc"
 	"github.com/nestybox/sysbox-fs/mount"
 	"github.com/nestybox/sysbox-fs/nsenter"
 	"github.com/nestybox/sysbox-fs/process"
+	"github.com/nestybox/sysbox-fs/recovery"
 	"github.com/nestybox/sysbox-fs/seccomp"
 	"github.com/nestybox/sysbox-fs/state"
 	"github.com/nestybox/sysbox-fs/sysio"
@@ -175,6 +178,16 @@ func setupRunDir() error {
 
 // sysbox-fs main function
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--recover-mount-helper" {
+		if err := recovery.RunMountHelper(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			if errors.Is(err, syscall.ESRCH) {
+				os.Exit(recovery.StaleTargetExitCode)
+			}
+			os.Exit(1)
+		}
+		return
+	}
 
 	app := cli.NewApp()
 	app.Name = "sysbox-fs"
@@ -182,6 +195,8 @@ func main() {
 	app.Version = version
 
 	app.Flags = []cli.Flag{
+		cli.DurationFlag{Name: "resource-cache-ttl", Value: 200 * time.Millisecond, Usage: "resource snapshot TTL (explicit setting also overrides uptime default)"},
+		cli.BoolFlag{Name: "session-recovery", Usage: "enable same-boot graceful recovery (requires systemd FD store and kernel BPF/BTF)"},
 		cli.StringFlag{
 			Name:  "mountpoint",
 			Value: "/var/lib/sysboxfs",
@@ -327,6 +342,9 @@ func main() {
 
 	// sysbox-fs main-loop execution.
 	app.Action = func(ctx *cli.Context) error {
+		if err := implementations.ConfigureResourceCacheTTL(ctx.GlobalDuration("resource-cache-ttl"), ctx.GlobalIsSet("resource-cache-ttl")); err != nil {
+			return err
+		}
 
 		logrus.Info("Starting sysbox-fs")
 		logrus.Infof("Edition: %s", edition)
@@ -367,6 +385,11 @@ func main() {
 		var syscallMonitorService = seccomp.NewSyscallMonitorService()
 		var ipcService = ipc.NewIpcService()
 		var mountService = mount.NewMountService()
+		if ctx.Bool("session-recovery") {
+			if err := syscallMonitorService.EnableRecovery(); err != nil {
+				return err
+			}
+		}
 
 		// Create the sysbox run dir
 		err = setupRunDir()
@@ -411,6 +434,14 @@ func main() {
 			nsenterService,
 		)
 
+		var recoveryState *recoveryRunner
+		if ctx.Bool("session-recovery") {
+			recoveryState, err = prepareRecovery(containerStateService, fuseServerService, ctx.GlobalString("mountpoint"))
+			if err != nil {
+				return err
+			}
+			defer recoveryState.events.Close()
+		}
 		syscallMonitorService.Setup(
 			nsenterService,
 			containerStateService,
@@ -421,6 +452,11 @@ func main() {
 			ctx.GlobalString("seccomp-fd-release"),
 		)
 
+		if recoveryState != nil {
+			if err := syscallMonitorService.RestoreSessions(); err != nil {
+				return err
+			}
+		}
 		ipcService.Setup(
 			containerStateService,
 			processService,
@@ -432,6 +468,10 @@ func main() {
 		profile, err := runProfiler(ctx)
 		if err != nil {
 			logrus.Fatal(err)
+		}
+
+		if recoveryState != nil {
+			return runRecoverable(recoveryState, ipcService, fuseServerService, syscallMonitorService.Quiesce, profile)
 		}
 
 		// Launch exit handler (performs proper cleanup of sysbox-fs upon

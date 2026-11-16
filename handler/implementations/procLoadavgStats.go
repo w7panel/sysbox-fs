@@ -27,7 +27,11 @@ import (
 )
 
 func loadavgStatsForPID(pid int) (int, int, int) {
-	cgTotal, cgRunning, cgLastPID, cgOK := cgroupTaskStats(pruneInitScopeCgroup(cgroupForPid(uint32(pid))))
+	cg := cgroupForPid(uint32(pid))
+	if cg.v2Path == "" && len(cg.v1) == 0 {
+		return 0, 0, 0
+	}
+	cgTotal, cgRunning, cgLastPID, cgOK := cgroupTaskStats(pruneInitScopeCgroup(cg))
 	if cgOK && (cgTotal > 1 || cgRunning > 0) {
 		return cgTotal, cgRunning, cgLastPID
 	}
@@ -40,7 +44,7 @@ func loadavgStatsForPID(pid int) (int, int, int) {
 	if cgOK {
 		return cgTotal, cgRunning, cgLastPID
 	}
-	return visibleProcessStatsFromCgroup(cgroupForPid(uint32(pid)))
+	return visibleProcessStatsFromCgroup(cg)
 }
 func visibleProcessStats(req *domain.HandlerRequest) (int, int, int) {
 	if req.Pid != 0 {
