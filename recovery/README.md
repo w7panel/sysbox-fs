@@ -19,7 +19,8 @@ On startup, FS recreates registered views and listeners. BPF reports ENOTCONN/EI
 on checkpointed FUSE devices, deduplicated per namespace/device for one second.
 The helper pins the target namespace and root, clones only the matching sysboxfs
 mounts, retains their access flags and overlays the old mounts. A minute fallback
-checks registered outer mount trees; it does not scan host processes. New opens
+checks registered containers and mount namespaces in their cgroup subtrees; it
+does not scan unrelated host processes. New opens
 recover; already-open descriptors remain attached to the disconnected session.
 No host `/proc` passthrough is used.
 
