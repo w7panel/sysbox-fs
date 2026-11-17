@@ -64,3 +64,37 @@ func TestResourceReleaseClearsOnlyClosedLifetime(t *testing.T) {
 		t.Fatal("closed stat state resurrected or unrelated state removed")
 	}
 }
+
+func TestProcStatStatePrunesStaleViewsOnSchedule(t *testing.T) {
+	now := time.Now()
+	procStatStatesMu.Lock()
+	previousStates, previousPrune := procStatStates, procStatNextPrune
+	procStatStates = map[string]*procStatState{
+		"stale": {lastSeen: now.Add(-procStatStateStaleAfter - time.Second)},
+		"fresh": {lastSeen: now},
+	}
+	procStatNextPrune = now.Add(time.Minute)
+	procStatStatesMu.Unlock()
+	t.Cleanup(func() {
+		procStatStatesMu.Lock()
+		procStatStates, procStatNextPrune = previousStates, previousPrune
+		procStatStatesMu.Unlock()
+	})
+
+	req := &domain.HandlerRequest{}
+	procStatStateForKey(req, "fresh", now)
+	procStatStatesMu.Lock()
+	_, stillPresent := procStatStates["stale"]
+	procStatStatesMu.Unlock()
+	if !stillPresent {
+		t.Fatal("pruned stale views on an ordinary lookup")
+	}
+	procStatStateForKey(req, "fresh", now.Add(time.Minute))
+	procStatStatesMu.Lock()
+	_, stalePresent := procStatStates["stale"]
+	_, freshPresent := procStatStates["fresh"]
+	procStatStatesMu.Unlock()
+	if stalePresent || !freshPresent {
+		t.Fatal("scheduled prune removed the wrong views")
+	}
+}

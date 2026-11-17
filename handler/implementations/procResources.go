@@ -83,8 +83,9 @@ type procStatDelta struct {
 }
 
 var (
-	procStatStatesMu sync.Mutex
-	procStatStates   = make(map[string]*procStatState)
+	procStatStatesMu  sync.Mutex
+	procStatStates    = make(map[string]*procStatState)
+	procStatNextPrune time.Time
 )
 
 func newReadOnlyResource(name, path string, read resourceReader) *readOnlyResource {
@@ -857,13 +858,17 @@ func procStatStateForKey(req *domain.HandlerRequest, key string, now time.Time) 
 		return &procStatState{}
 	}
 
-	for k, state := range procStatStates {
-		state.mu.Lock()
-		stale := !state.lastSeen.IsZero() && now.Sub(state.lastSeen) > procStatStateStaleAfter
-		state.mu.Unlock()
-		if stale {
-			delete(procStatStates, k)
+	// Container teardown removes its states immediately; this sweep handles stale views.
+	if !now.Before(procStatNextPrune) {
+		for k, state := range procStatStates {
+			state.mu.Lock()
+			stale := !state.lastSeen.IsZero() && now.Sub(state.lastSeen) > procStatStateStaleAfter
+			state.mu.Unlock()
+			if stale {
+				delete(procStatStates, k)
+			}
 		}
+		procStatNextPrune = now.Add(time.Minute)
 	}
 
 	state, ok := procStatStates[key]
