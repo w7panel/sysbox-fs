@@ -43,6 +43,9 @@ type recoveryRunner struct {
 	duration                                    time.Duration
 	durationCount                               uint64
 	durationBuckets                             [len(recoveryDurationBounds)]uint64
+	fallbackScanDuration                        time.Duration
+	fallbackScanCount                           uint64
+	fallbackScanCandidates                      int
 	faultCounts                                 map[faultProcess]int
 }
 
@@ -192,6 +195,7 @@ func (r *recoveryRunner) run(ctx context.Context) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				scanStarted := time.Now()
 				r.mu.Lock()
 				r.faultCounts = make(map[faultProcess]int)
 				r.mu.Unlock()
@@ -218,7 +222,10 @@ func (r *recoveryRunner) run(ctx context.Context) error {
 					}
 				}
 				r.mu.Lock()
-				logrus.WithFields(logrus.Fields{"attempts": r.attempts, "successes": r.succeeded, "failures": r.failed, "old_fd_events": r.stale, "unsupported": r.skipped}).Info("FUSE recovery counters")
+				r.fallbackScanDuration += time.Since(scanStarted)
+				r.fallbackScanCount++
+				r.fallbackScanCandidates = len(seen)
+				logrus.WithFields(logrus.Fields{"attempts": r.attempts, "successes": r.succeeded, "failures": r.failed, "old_fd_events": r.stale, "unsupported": r.skipped, "scan_candidates": len(seen), "scan_duration_ms": time.Since(scanStarted).Milliseconds()}).Info("FUSE recovery counters")
 				r.mu.Unlock()
 			}
 		}
@@ -311,6 +318,9 @@ func (r *recoveryRunner) writeMetrics(w io.Writer) {
 	duration := r.duration
 	durationCount := r.durationCount
 	durationBuckets := r.durationBuckets
+	fallbackScanDuration := r.fallbackScanDuration
+	fallbackScanCount := r.fallbackScanCount
+	fallbackScanCandidates := r.fallbackScanCandidates
 	r.mu.Unlock()
 	for i, name := range [...]string{
 		"recovery_attempts", "recovery_successes", "recovery_failures", "recovery_old_fd_events",
@@ -325,6 +335,11 @@ func (r *recoveryRunner) writeMetrics(w io.Writer) {
 	fmt.Fprintf(w, "sysbox_fs_recovery_duration_seconds_bucket{le=\"+Inf\"} %d\n", durationCount)
 	fmt.Fprintf(w, "sysbox_fs_recovery_duration_seconds_sum %.9f\n", duration.Seconds())
 	fmt.Fprintf(w, "sysbox_fs_recovery_duration_seconds_count %d\n", durationCount)
+	fmt.Fprintln(w, "# TYPE sysbox_fs_fallback_scan_duration_seconds summary")
+	fmt.Fprintf(w, "sysbox_fs_fallback_scan_duration_seconds_sum %.9f\n", fallbackScanDuration.Seconds())
+	fmt.Fprintf(w, "sysbox_fs_fallback_scan_duration_seconds_count %d\n", fallbackScanCount)
+	fmt.Fprintln(w, "# TYPE sysbox_fs_fallback_scan_candidates gauge")
+	fmt.Fprintf(w, "sysbox_fs_fallback_scan_candidates %d\n", fallbackScanCandidates)
 }
 
 func (r *recoveryRunner) writeMetricsTextfile(path string) error {

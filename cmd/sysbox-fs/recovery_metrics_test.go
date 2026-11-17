@@ -14,7 +14,7 @@ import (
 
 func TestRecoveryMetricsSocket(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "metrics.sock")
-	r := &recoveryRunner{attempts: 3, succeeded: 2, failed: 1, faultEvents: 4, frequentFaults: 1}
+	r := &recoveryRunner{attempts: 3, succeeded: 2, failed: 1, faultEvents: 4, frequentFaults: 1, fallbackScanDuration: 3 * time.Second, fallbackScanCount: 2, fallbackScanCandidates: 7}
 	for _, elapsed := range []time.Duration{5 * time.Millisecond, 200 * time.Millisecond, 1200 * time.Millisecond} {
 		r.observeDuration(elapsed)
 	}
@@ -45,6 +45,9 @@ func TestRecoveryMetricsSocket(t *testing.T) {
 		"sysbox_fs_recovery_duration_seconds_bucket{le=\"+Inf\"} 3\n",
 		"sysbox_fs_recovery_duration_seconds_sum 1.405000000\n",
 		"sysbox_fs_recovery_duration_seconds_count 3\n",
+		"sysbox_fs_fallback_scan_duration_seconds_sum 3.000000000\n",
+		"sysbox_fs_fallback_scan_duration_seconds_count 2\n",
+		"sysbox_fs_fallback_scan_candidates 7\n",
 	} {
 		if !strings.Contains(string(body), line) {
 			t.Fatalf("missing %q in %q", line, body)
