@@ -28,23 +28,67 @@ import (
 
 func loadavgStatsForPID(pid int) (int, int, int) {
 	cg := cgroupForPid(uint32(pid))
-	if cg.v2Path == "" && len(cg.v1) == 0 {
+	ns, err := os.Readlink(fmt.Sprintf("/proc/%d/ns/pid", pid))
+	if err != nil {
 		return 0, 0, 0
 	}
-	cgTotal, cgRunning, cgLastPID, cgOK := cgroupTaskStats(pruneInitScopeCgroup(cg))
+	return loadavgStatsForView(pruneInitScopeCgroup(cg), ns)
+}
+
+func loadavgStatsForView(cg cgroupView, ns string) (int, int, int) {
+	if (cg.v2Path == "" && len(cg.v1) == 0) || ns == "" {
+		return 0, 0, 0
+	}
+	cgTotal, cgRunning, cgLastPID, cgOK := cgroupTaskStats(cg, ns)
 	if cgOK && (cgTotal > 1 || cgRunning > 0) {
 		return cgTotal, cgRunning, cgLastPID
 	}
-	if total, running, lastPID, ok := samePIDNamespaceStats(pid); ok && total > cgTotal {
-		return total, running, lastPID
-	}
-	if total, running, lastPID, ok := containerProcStats(pid); ok && total > cgTotal {
+	total, running, lastPID := visibleProcessStatsFromCgroupAndNamespace(cg, ns)
+	if total > cgTotal {
 		return total, running, lastPID
 	}
 	if cgOK {
 		return cgTotal, cgRunning, cgLastPID
 	}
-	return visibleProcessStatsFromCgroup(cg)
+	return total, running, lastPID
+}
+
+func visibleProcessStatsFromCgroupAndNamespace(cg cgroupView, ns string) (int, int, int) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0, 0, 0
+	}
+	var total, running, lastPID int
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		processNS, err := os.Readlink(filepath.Join("/proc", entry.Name(), "ns/pid"))
+		if err != nil || processNS != ns || !loadavgCgroupContains(cg, cgroupForPid(uint32(pid))) {
+			continue
+		}
+		total++
+		if n := namespacePID(pid); n > lastPID {
+			lastPID = n
+		}
+		if state, ok := procState(filepath.Join("/proc", entry.Name(), "status")); ok && loadavgActiveState(state) {
+			running++
+		}
+	}
+	return total, running, lastPID
+}
+
+func loadavgCgroupContains(parent, child cgroupView) bool {
+	if parent.v2Path != "" && child.v2Path != "" {
+		return sameOrChildPath(parent.v2Path, child.v2Path)
+	}
+	for ctrl, path := range parent.v1 {
+		if childPath := child.v1[ctrl]; childPath != "" && sameOrChildPath(path, childPath) {
+			return true
+		}
+	}
+	return false
 }
 func visibleProcessStats(req *domain.HandlerRequest) (int, int, int) {
 	if req.Pid != 0 {

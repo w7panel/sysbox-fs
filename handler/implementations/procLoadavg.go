@@ -37,6 +37,7 @@ type loadavgNode struct {
 	pidfd      *os.File
 	cgroupKey  string
 	pidns      string
+	viewCgroup cgroupView
 	owner      string
 	closed     bool
 	refreshing bool
@@ -51,16 +52,16 @@ type loadavgNode struct {
 type loadavgSamplerState struct {
 	sync.Mutex
 	nodes  map[string]*loadavgNode
-	sample func(int) (int, int, int)
+	sample func(int, cgroupView, string) (int, int, int)
 }
 
 var loadavgSampler = &loadavgSamplerState{
 	nodes:  make(map[string]*loadavgNode),
-	sample: loadavgStatsForPID,
+	sample: func(_ int, cg cgroupView, ns string) (int, int, int) { return loadavgStatsForView(cg, ns) },
 }
 
 func loadavgSamplerForReq(req *domain.HandlerRequest) *loadavgNode {
-	key, samplePID := loadavgNodeKey(req)
+	key, samplePID, viewCgroup, viewNS := loadavgNodeKey(req)
 	owner := ""
 	if req != nil {
 		owner = resourceOwnerKey(req)
@@ -76,7 +77,7 @@ func loadavgSamplerForReq(req *domain.HandlerRequest) *loadavgNode {
 	if node == nil {
 		fd, err := unix.PidfdOpen(samplePID, 0)
 		ns, nsErr := os.Readlink(fmt.Sprintf("/proc/%d/ns/pid", samplePID))
-		if err != nil || nsErr != nil {
+		if err != nil || nsErr != nil || ns != viewNS {
 			if err == nil {
 				unix.Close(fd)
 			}
@@ -85,11 +86,12 @@ func loadavgSamplerForReq(req *domain.HandlerRequest) *loadavgNode {
 		}
 		node = &loadavgNode{
 			key: key, cgroupKey: cgroupViewKey(pruneInitScopeCgroup(cgroupForPid(uint32(samplePID)))), pidfd: os.NewFile(uintptr(fd), "loadavg-pid"), pidns: ns,
-			stop:      make(chan struct{}),
-			owner:     owner,
-			samplePID: samplePID,
-			total:     1,
-			lastPID:   namespacePID(samplePID),
+			viewCgroup: viewCgroup,
+			stop:       make(chan struct{}),
+			owner:      owner,
+			samplePID:  samplePID,
+			total:      1,
+			lastPID:    namespacePID(samplePID),
 		}
 		loadavgSampler.nodes[key] = node
 		go loadavgSampler.run(node)
@@ -140,9 +142,10 @@ func (s *loadavgSamplerState) refresh(node *loadavgNode) {
 	}
 	node.refreshing = true
 	samplePID := node.samplePID
+	viewCgroup, viewNS := node.viewCgroup, node.pidns
 	node.Unlock()
 
-	total, running, lastPID := s.sample(samplePID)
+	total, running, lastPID := s.sample(samplePID, viewCgroup, viewNS)
 	total, running = normalizeLoadavgSample(total, running)
 	if lastPID == 0 {
 		lastPID = namespacePID(samplePID)

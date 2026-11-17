@@ -45,32 +45,32 @@ func newPidNamespaceInitCache(limit int) *pidNamespaceInitCache {
 	}
 }
 
-func loadavgNodeKey(req *domain.HandlerRequest) (string, int) {
+func loadavgNodeKey(req *domain.HandlerRequest) (string, int, cgroupView, string) {
 	pid := int(os.Getpid())
+	containerID := ""
 	if req != nil && req.Pid != 0 {
 		pid = int(req.Pid)
-		if initPID := pidNamespaceInitPID(pid); initPID != 0 {
-			pid = initPID
-		}
 	} else if req != nil && req.Container != nil && req.Container.InitPid() != 0 {
 		pid = int(req.Container.InitPid())
-		if id := req.Container.ID(); id != "" {
-			return "container:" + id, pid
-		}
+		containerID = req.Container.ID()
 	}
 
 	cg := cgroupForPid(uint32(pid))
 	cg = pruneInitScopeCgroup(cg)
-	if cg.v2Path != "" {
-		return "cpu:" + cg.v2Path, pid
-	}
-	if cg.v1["cpu"] != "" {
-		return "cpu:" + cg.v1["cpu"], pid
-	}
 	if ns, err := os.Readlink(fmt.Sprintf("/proc/%d/ns/pid", pid)); err == nil {
-		return "pidns:" + ns, pid
+		if initPID := pidNamespaceInitPID(pid); initPID != 0 {
+			pid = initPID
+		}
+		if containerID != "" {
+			return "container:" + containerID, pid, cg, ns
+		}
+		return loadavgViewKey(cg, ns), pid, cg, ns
 	}
-	return fmt.Sprintf("pid:%d", pid), pid
+	return fmt.Sprintf("pid:%d", pid), pid, cg, ""
+}
+
+func loadavgViewKey(cg cgroupView, ns string) string {
+	return "cgroup:" + cgroupViewKey(cg) + "\x00pidns:" + ns
 }
 
 func pidNamespaceInitPID(pid int) int {

@@ -30,27 +30,36 @@ const recoveryMetricsSocket = "/run/sysbox/recovery-metrics.sock"
 const recoveryMetricsTextfile = "/run/sysbox-metrics/sysbox-fs.prom"
 
 type recoveryRunner struct {
-	events                                      *recovery.Events
-	css                                         domain.ContainerStateServiceIface
-	root                                        string
-	records                                     map[uint32][]state.RestartContainer
-	mu                                          sync.Mutex
-	repaired                                    sync.Map
-	fallbackDone                                sync.Map
-	silentDone                                  sync.Map
-	attempts, succeeded, failed, stale, skipped uint64
-	faultEvents, frequentFaults                 uint64
-	duration                                    time.Duration
-	durationCount                               uint64
-	durationBuckets                             [len(recoveryDurationBounds)]uint64
-	fallbackScanDuration                        time.Duration
-	fallbackScanCount                           uint64
-	fallbackScanCandidates                      int
-	faultCounts                                 map[faultProcess]int
+	events interface {
+		Read() (recovery.Fault, error)
+		Close() error
+	}
+	css                                             domain.ContainerStateServiceIface
+	root                                            string
+	records                                         map[uint32][]state.RestartContainer
+	repairMu                                        sync.Mutex
+	statsMu                                         sync.Mutex
+	repaired                                        sync.Map
+	fallbackDone                                    sync.Map
+	silentDone                                      sync.Map
+	attempts, succeeded, failed, stale, skipped     uint64
+	faultEvents, frequentFaults, droppedFaultEvents uint64
+	duration                                        time.Duration
+	durationCount                                   uint64
+	durationBuckets                                 [len(recoveryDurationBounds)]uint64
+	fallbackScanDuration                            time.Duration
+	fallbackScanCount                               uint64
+	fallbackScanCandidates                          int
+	faultCounts                                     map[faultProcess]int
 }
 
 type faultProcess struct {
 	pid       uint32
+	namespace uint64
+	device    uint32
+}
+
+type faultMount struct {
 	namespace uint64
 	device    uint32
 }
@@ -63,6 +72,8 @@ var recoveryDurationBounds = [...]time.Duration{
 }
 
 func (r *recoveryRunner) observeDuration(elapsed time.Duration) {
+	r.statsMu.Lock()
+	defer r.statsMu.Unlock()
 	r.duration += elapsed
 	r.durationCount++
 	for i, bound := range recoveryDurationBounds {
@@ -135,8 +146,8 @@ func prepareRecovery(css domain.ContainerStateServiceIface, fss *fuse.FuseServer
 }
 
 func (r *recoveryRunner) repair(ctx context.Context, pid uint32, c state.RestartContainer, deviceNums []uint32) repairResult {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.repairMu.Lock()
+	defer r.repairMu.Unlock()
 	current := r.css.ContainerLookupById(c.ID)
 	if ctx.Err() != nil || current == nil || current.InitPid() != c.PID {
 		return repairFailed
@@ -149,7 +160,9 @@ func (r *recoveryRunner) repair(ctx context.Context, pid uint32, c state.Restart
 	for _, dev := range deviceNums {
 		devices = append(devices, recovery.Device{Major: dev >> 20, Minor: dev & ((1 << 20) - 1)})
 	}
+	r.statsMu.Lock()
 	r.attempts++
+	r.statsMu.Unlock()
 	started := time.Now()
 	defer func() { r.observeDuration(time.Since(started)) }()
 	targetNS, targetErr := os.Stat(fmt.Sprintf("/proc/%d/ns/mnt", pid))
@@ -163,31 +176,44 @@ func (r *recoveryRunner) repair(ctx context.Context, pid uint32, c state.Restart
 	}
 	if err != nil {
 		if errors.Is(err, syscall.ESRCH) {
+			r.statsMu.Lock()
 			r.stale++
+			r.statsMu.Unlock()
 			return repairFailed
 		}
 		if errors.Is(err, recovery.ErrUnsupportedPropagation) {
+			r.statsMu.Lock()
 			r.skipped++
+			r.statsMu.Unlock()
 			logrus.WithError(err).WithField("container", c.ID).WithField("pid", pid).Warn("FUSE recovery skipped unsupported namespace")
 			return repairUnsupported
 		}
+		r.statsMu.Lock()
 		r.failed++
+		r.statsMu.Unlock()
 		logrus.WithError(err).WithField("container", c.ID).WithField("pid", pid).WithField("duration_ms", time.Since(started).Milliseconds()).Error("FUSE recovery incomplete")
 		return repairFailed
 	} else if len(paths) > 0 {
+		r.statsMu.Lock()
 		r.succeeded++
+		r.statsMu.Unlock()
 		logrus.WithField("container", c.ID).WithField("pid", pid).WithField("duration_ms", time.Since(started).Milliseconds()).Info("FUSE mounts recovered; reopen stale descriptors")
 		return repairReplaced
 	} else {
+		r.statsMu.Lock()
 		r.stale++
+		r.statsMu.Unlock()
 		return repairUnchanged
 	}
 }
 
 func (r *recoveryRunner) run(ctx context.Context) error {
-	go func() { <-ctx.Done(); r.events.Close() }()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	// The minute fallback inspects only registered containers and their cgroups.
+	fallbackDone := make(chan struct{})
 	go func() {
+		defer close(fallbackDone)
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		for {
@@ -196,9 +222,9 @@ func (r *recoveryRunner) run(ctx context.Context) error {
 				return
 			case <-ticker.C:
 				scanStarted := time.Now()
-				r.mu.Lock()
+				r.statsMu.Lock()
 				r.faultCounts = make(map[faultProcess]int)
-				r.mu.Unlock()
+				r.statsMu.Unlock()
 				seen := make(map[string]bool)
 				for _, owners := range r.records {
 					for _, c := range owners {
@@ -221,15 +247,54 @@ func (r *recoveryRunner) run(ctx context.Context) error {
 						}
 					}
 				}
-				r.mu.Lock()
+				r.statsMu.Lock()
 				r.fallbackScanDuration += time.Since(scanStarted)
 				r.fallbackScanCount++
 				r.fallbackScanCandidates = len(seen)
 				logrus.WithFields(logrus.Fields{"attempts": r.attempts, "successes": r.succeeded, "failures": r.failed, "old_fd_events": r.stale, "unsupported": r.skipped, "scan_candidates": len(seen), "scan_duration_ms": time.Since(scanStarted).Milliseconds()}).Info("FUSE recovery counters")
-				r.mu.Unlock()
+				r.statsMu.Unlock()
 			}
 		}
 	}()
+	err := r.runEvents(ctx, r.handleFault)
+	cancel()
+	<-fallbackDone
+	return err
+}
+
+// runEvents keeps reading kernel faults while one worker performs mount repairs.
+// Duplicate faults share one pending repair; a full queue leaves recovery to the
+// minute fallback without blocking the ring buffer reader.
+func (r *recoveryRunner) runEvents(ctx context.Context, handle func(context.Context, recovery.Fault)) error {
+	ctx, cancel := context.WithCancel(ctx)
+	eventsClosed := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		r.events.Close()
+		close(eventsClosed)
+	}()
+	queue := make(chan recovery.Fault, 256)
+	pending := make(map[faultMount]bool)
+	var pendingMu sync.Mutex
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case fault := <-queue:
+				if ctx.Err() != nil {
+					return
+				}
+				handle(ctx, fault)
+				pendingMu.Lock()
+				delete(pending, faultMount{fault.Namespace, fault.Device})
+				pendingMu.Unlock()
+			}
+		}
+	}()
+	defer func() { cancel(); <-workerDone; <-eventsClosed }()
 	for {
 		fault, err := r.events.Read()
 		if err != nil {
@@ -238,7 +303,7 @@ func (r *recoveryRunner) run(ctx context.Context) error {
 			}
 			return fmt.Errorf("FUSE fault event stream stopped: %w", err)
 		}
-		r.mu.Lock()
+		r.statsMu.Lock()
 		r.faultEvents++
 		process := faultProcess{fault.PID, fault.Namespace, fault.Device}
 		r.faultCounts[process]++
@@ -246,29 +311,46 @@ func (r *recoveryRunner) run(ctx context.Context) error {
 		if frequent {
 			r.frequentFaults++
 		}
-		r.mu.Unlock()
+		r.statsMu.Unlock()
 		if frequent {
 			logrus.WithFields(logrus.Fields{"pid": fault.PID, "namespace": fault.Namespace, "device": fault.Device}).Warn("frequent stale FUSE reads; process must reopen old descriptors")
 		}
-		key := struct {
-			namespace uint64
-			device    uint32
-		}{fault.Namespace, fault.Device}
+		key := faultMount{fault.Namespace, fault.Device}
 		if _, done := r.repaired.Load(key); done {
 			continue
 		}
-		owners := r.records[fault.Device]
-		for _, c := range owners {
-			pid, err := recoveryPID(ctx, fault, c)
-			if err != nil {
-				continue
+		pendingMu.Lock()
+		if !pending[key] {
+			pending[key] = true
+			select {
+			case queue <- fault:
+			default:
+				delete(pending, key)
+				r.statsMu.Lock()
+				r.droppedFaultEvents++
+				r.statsMu.Unlock()
 			}
-			// The helper pins and revalidates the namespace and mounts before mutation.
-			result := r.repair(ctx, pid, c, []uint32{fault.Device})
-			if result == repairReplaced || result == repairUnchanged && len(owners) == 1 {
-				r.repaired.Store(key, struct{}{})
-				break
-			}
+		}
+		pendingMu.Unlock()
+	}
+}
+
+func (r *recoveryRunner) handleFault(ctx context.Context, fault recovery.Fault) {
+	key := faultMount{fault.Namespace, fault.Device}
+	if _, done := r.repaired.Load(key); done {
+		return
+	}
+	owners := r.records[fault.Device]
+	for _, c := range owners {
+		pid, err := recoveryPID(ctx, fault, c)
+		if err != nil {
+			continue
+		}
+		// The helper pins and revalidates the namespace and mounts before mutation.
+		result := r.repair(ctx, pid, c, []uint32{fault.Device})
+		if result == repairReplaced || result == repairUnchanged && len(owners) == 1 {
+			r.repaired.Store(key, struct{}{})
+			break
 		}
 	}
 }
@@ -313,18 +395,18 @@ func (r *recoveryRunner) metrics(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *recoveryRunner) writeMetrics(w io.Writer) {
-	r.mu.Lock()
-	values := [7]uint64{r.attempts, r.succeeded, r.failed, r.stale, r.skipped, r.faultEvents, r.frequentFaults}
+	r.statsMu.Lock()
+	values := [8]uint64{r.attempts, r.succeeded, r.failed, r.stale, r.skipped, r.faultEvents, r.frequentFaults, r.droppedFaultEvents}
 	duration := r.duration
 	durationCount := r.durationCount
 	durationBuckets := r.durationBuckets
 	fallbackScanDuration := r.fallbackScanDuration
 	fallbackScanCount := r.fallbackScanCount
 	fallbackScanCandidates := r.fallbackScanCandidates
-	r.mu.Unlock()
+	r.statsMu.Unlock()
 	for i, name := range [...]string{
 		"recovery_attempts", "recovery_successes", "recovery_failures", "recovery_old_fd_events",
-		"recovery_unsupported", "recovery_fault_events", "recovery_frequent_fault_processes",
+		"recovery_unsupported", "recovery_fault_events", "recovery_frequent_fault_processes", "recovery_dropped_fault_events",
 	} {
 		fmt.Fprintf(w, "sysbox_fs_%s_total %d\n", name, values[i])
 	}
@@ -448,8 +530,11 @@ func runRecoverable(r *recoveryRunner, ipc domain.IpcServiceIface, fss *fuse.Fus
 		return err
 	}
 	cancel()
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	if err := <-eventResult; err != nil {
+		return err
+	}
+	r.repairMu.Lock()
+	defer r.repairMu.Unlock()
 	fss.Quiesce()
 	if err := state.SaveRestart(r.css, fss.StateContainer, fsRestartFile, r.root, true); err != nil {
 		return err

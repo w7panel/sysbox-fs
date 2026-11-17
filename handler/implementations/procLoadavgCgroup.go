@@ -43,8 +43,12 @@ func pruneInitScopePath(path string) string {
 	return strings.TrimSuffix(path, "/init.scope")
 }
 
-func cgroupTaskStats(cg cgroupView) (int, int, int, bool) {
+func cgroupTaskStats(cg cgroupView, pidns string) (int, int, int, bool) {
 	pids := cgroupProcessPIDs(cg)
+	return loadavgTaskStats(pids, pidns, "/proc")
+}
+
+func loadavgTaskStats(pids map[int]struct{}, pidns, procRoot string) (int, int, int, bool) {
 	if len(pids) == 0 {
 		return 0, 0, 0, false
 	}
@@ -53,7 +57,7 @@ func cgroupTaskStats(cg cgroupView) (int, int, int, bool) {
 	running := 0
 	lastPID := 0
 	for pid := range pids {
-		taskDir := filepath.Join("/proc", strconv.Itoa(pid), "task")
+		taskDir := filepath.Join(procRoot, strconv.Itoa(pid), "task")
 		entries, err := os.ReadDir(taskDir)
 		if err != nil {
 			continue
@@ -64,6 +68,10 @@ func cgroupTaskStats(cg cgroupView) (int, int, int, bool) {
 			}
 			tid, err := strconv.Atoi(entry.Name())
 			if err != nil {
+				continue
+			}
+			ns, err := os.Readlink(filepath.Join(taskDir, entry.Name(), "ns/pid"))
+			if err != nil || ns != pidns {
 				continue
 			}
 			total++

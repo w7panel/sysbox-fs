@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
@@ -11,6 +12,23 @@ import (
 	"testing"
 	"time"
 )
+
+func TestRecoveryMetricsDoNotWaitForMountRepair(t *testing.T) {
+	r := &recoveryRunner{attempts: 1}
+	r.repairMu.Lock()
+	defer r.repairMu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		var out bytes.Buffer
+		r.writeMetrics(&out)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("metrics blocked by mount repair")
+	}
+}
 
 func TestRecoveryMetricsSocket(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "metrics.sock")
