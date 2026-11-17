@@ -89,6 +89,7 @@ func loadavgSamplerForReq(req *domain.HandlerRequest) *loadavgNode {
 			owner:     owner,
 			samplePID: samplePID,
 			total:     1,
+			lastPID:   namespacePID(samplePID),
 		}
 		loadavgSampler.nodes[key] = node
 		go loadavgSampler.run(node)

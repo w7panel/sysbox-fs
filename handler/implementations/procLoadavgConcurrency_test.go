@@ -138,6 +138,9 @@ func TestLoadavgLazyOwnerSampler(t *testing.T) {
 	req := &domain.HandlerRequest{ResourceOwner: owner}
 	t.Cleanup(func() { ReleaseResourceOwner(owner) })
 	first := loadavgSamplerForReq(req)
+	if first.lastPID == 0 {
+		t.Fatal("first loadavg read has no namespace PID seed")
+	}
 	if first != loadavgSamplerForReq(req) {
 		t.Fatal("repeated read created another sampler")
 	}
