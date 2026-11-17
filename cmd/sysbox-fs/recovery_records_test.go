@@ -13,6 +13,7 @@ func TestRecoveryForgetsDeadCheckpointOwners(t *testing.T) {
 		2: {{ID: "dead"}},
 	}}
 	r.fallbackDone.Store("dead", struct{}{})
+	r.silentDone = map[string]map[uint64]bool{"dead": {10: true}, "live": {20: true}}
 	r.forgetRecords(map[string]bool{"dead": true})
 	if got := r.checkpointContainers(); len(got) != 1 || got[0].ID != "live" {
 		t.Fatalf("checkpoint containers after unregister: %+v", got)
@@ -25,6 +26,26 @@ func TestRecoveryForgetsDeadCheckpointOwners(t *testing.T) {
 	}
 	if _, ok := r.fallbackDone.Load("dead"); ok {
 		t.Fatal("dead container remains marked as scanned")
+	}
+	if _, ok := r.silentDone["dead"]; ok {
+		t.Fatal("dead container retains nested namespaces")
+	}
+	if !r.silentDone["live"][20] {
+		t.Fatal("live container lost nested namespace")
+	}
+}
+
+func TestRecoveryPrunesExitedNestedNamespaces(t *testing.T) {
+	r := &recoveryRunner{silentDone: map[string]map[uint64]bool{
+		"ckm": {10: true, 20: true},
+	}}
+	r.pruneSilentNamespaces("ckm", map[uint64]uint32{20: 200, 30: 300})
+	if len(r.silentDone["ckm"]) != 1 || !r.silentDone["ckm"][20] {
+		t.Fatalf("stale namespace retained or live namespace lost: %+v", r.silentDone["ckm"])
+	}
+	r.pruneSilentNamespaces("ckm", map[uint64]uint32{})
+	if _, ok := r.silentDone["ckm"]; ok {
+		t.Fatal("empty container namespace set retained")
 	}
 }
 

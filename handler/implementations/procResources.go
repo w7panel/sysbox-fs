@@ -164,6 +164,9 @@ func (h *readOnlyResource) Read(n domain.IOnodeIface, req *domain.HandlerRequest
 }
 
 func (h *readOnlyResource) snapshotData(req *domain.HandlerRequest) ([]byte, error) {
+	if err := requireRequestResourceView(req); err != nil {
+		return nil, err
+	}
 	return h.snapshots.get(resourceViewKey(req), resourceOwnerKey(req), req.ResourceOwner,
 		req.Offset > 0, time.Now(), resourceCacheTTL(req, resourceSnapshotTTL), func() ([]byte, error) { return h.read(req) })
 }
@@ -245,15 +248,18 @@ func cgroupForReq(req *domain.HandlerRequest) cgroupView {
 }
 
 func cgroupForPid(pid uint32) cgroupView {
-	view := cgroupView{v1: make(map[string]string)}
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
 	if err != nil {
-		return view
+		return cgroupView{}
 	}
+	return parseCgroupView(data)
+}
 
+func parseCgroupView(data []byte) cgroupView {
+	view := cgroupView{v1: make(map[string]string)}
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		parts := strings.SplitN(line, ":", 3)
-		if len(parts) != 3 {
+		if len(parts) != 3 || !strings.HasPrefix(parts[2], "/") {
 			continue
 		}
 		if parts[1] == "" {

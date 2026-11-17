@@ -42,7 +42,7 @@ type recoveryRunner struct {
 	statsMu                                         sync.Mutex
 	repaired                                        sync.Map
 	fallbackDone                                    sync.Map
-	silentDone                                      sync.Map
+	silentDone                                      map[string]map[uint64]bool
 	pendingMounts                                   map[string][]string
 	attempts, succeeded, failed, stale, skipped     uint64
 	faultEvents, frequentFaults, droppedFaultEvents uint64
@@ -266,6 +266,18 @@ func (r *recoveryRunner) forgetRecords(dead map[string]bool) {
 	r.recordsMu.Unlock()
 	for id := range dead {
 		r.fallbackDone.Delete(id)
+		delete(r.silentDone, id)
+	}
+}
+
+func (r *recoveryRunner) pruneSilentNamespaces(id string, namespaces map[uint64]uint32) {
+	for namespace := range r.silentDone[id] {
+		if _, alive := namespaces[namespace]; !alive {
+			delete(r.silentDone[id], namespace)
+		}
+	}
+	if len(r.silentDone[id]) == 0 {
+		delete(r.silentDone, id)
 	}
 }
 
@@ -435,17 +447,20 @@ func (r *recoveryRunner) repairSilentNamespaces(ctx context.Context, c state.Res
 	if unix.Stat(fmt.Sprintf("/proc/%d/ns/mnt", c.PID), &outer) != nil {
 		return
 	}
+	r.pruneSilentNamespaces(c.ID, namespaces)
 	for namespace, pid := range namespaces {
 		if namespace != outer.Ino {
-			key := struct {
-				container string
-				namespace uint64
-			}{c.ID, namespace}
-			if _, done := r.silentDone.Load(key); done {
+			if r.silentDone[c.ID][namespace] {
 				continue
 			}
 			if r.repair(ctx, pid, c, c.Devices) != repairFailed {
-				r.silentDone.Store(key, struct{}{})
+				if r.silentDone == nil {
+					r.silentDone = make(map[string]map[uint64]bool)
+				}
+				if r.silentDone[c.ID] == nil {
+					r.silentDone[c.ID] = make(map[uint64]bool)
+				}
+				r.silentDone[c.ID][namespace] = true
 			}
 		}
 	}

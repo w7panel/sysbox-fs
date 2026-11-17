@@ -217,6 +217,9 @@ func (h *ProcUptime) readUptime(
 }
 
 func procUptimeData(req *domain.HandlerRequest, ctime, now time.Time) ([]byte, error) {
+	if err := requireRequestResourceView(req); err != nil {
+		return nil, err
+	}
 	return procUptimeSnapshots.get(resourceViewKey(req), resourceOwnerKey(req), req.ResourceOwner,
 		req.Offset > 0, now, resourceCacheTTL(req, procUptimeSnapshotTTL), func() ([]byte, error) {
 			uptime := containerUptime(ctime, now)

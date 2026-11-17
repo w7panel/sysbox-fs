@@ -40,7 +40,7 @@ func TestProcSwapsVirtualLineFormat(t *testing.T) {
 func TestProcSwapsSplitReadKeepsSnapshot(t *testing.T) {
 	h := &ProcSwaps{}
 	owner := &domain.ResourceOwner{ID: 42}
-	req := &domain.HandlerRequest{Pid: ^uint32(0), ResourceOwner: owner, Data: make([]byte, 12)}
+	req := &domain.HandlerRequest{ResourceOwner: owner, Data: make([]byte, 12)}
 	want := string(procSwapsData(req))
 	n, err := h.readSwaps(nil, req)
 	if err != nil || string(req.Data[:n]) != want[:12] {

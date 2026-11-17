@@ -135,9 +135,41 @@ func TestResourceViewKeyIsolation(t *testing.T) {
 	}
 }
 
+func TestVirtualResourceRejectsMissingRequestIdentity(t *testing.T) {
+	req := &domain.HandlerRequest{Pid: ^uint32(0), Data: make([]byte, 4096)}
+	if err := requireRequestResourceView(req); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("request identity error = %v, want not exist", err)
+	}
+
+	h := newReadOnlyResource("Test", "/proc/meminfo", func(*domain.HandlerRequest) ([]byte, error) {
+		t.Fatal("resource reader used outer or host view")
+		return nil, nil
+	})
+	if _, err := h.snapshotData(req); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("resource read error = %v, want not exist", err)
+	}
+	if _, err := procUptimeData(req, time.Now(), time.Now()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("uptime read error = %v, want not exist", err)
+	}
+	if _, err := (&ProcSwaps{}).readSwaps(nil, req); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("swaps read error = %v, want not exist", err)
+	}
+}
+
+func TestRequestResourceViewRejectsMalformedCgroup(t *testing.T) {
+	cg := parseCgroupView([]byte("0::\n1:cpu:relative\n"))
+	if cg.v2Path != "" || len(cg.v1) != 0 {
+		t.Fatalf("malformed cgroup accepted: %#v", cg)
+	}
+	req := &domain.HandlerRequest{Pid: uint32(os.Getpid())}
+	if err := requireRequestResourceView(req); err != nil {
+		t.Fatalf("live request identity rejected: %v", err)
+	}
+}
+
 func TestReadOnlyResourcePartialRead(t *testing.T) {
 	h := newReadOnlyResource("Test", "/proc/snapshot-test", func(*domain.HandlerRequest) ([]byte, error) { return []byte("abcdef"), nil })
-	req := &domain.HandlerRequest{Pid: ^uint32(0), Data: make([]byte, 3)}
+	req := &domain.HandlerRequest{Data: make([]byte, 3)}
 	node := sysio.NewIOService(domain.IOOsFileService).NewIOnode("snapshot-test", h.Path, 0444)
 	defer h.snapshots.release(resourceOwnerKey(req))
 	n, err := h.Read(node, req)
@@ -279,7 +311,7 @@ func BenchmarkByteSnapshotsManyViews(b *testing.B) {
 }
 
 func TestResourceSnapshotContinuationSurvivesOtherResourcePrune(t *testing.T) {
-	req := &domain.HandlerRequest{Pid: ^uint32(0), Offset: 1}
+	req := &domain.HandlerRequest{Offset: 1}
 	stat := newReadOnlyResource("Stat", "/proc/stat", func(*domain.HandlerRequest) ([]byte, error) { t.Fatal("stat continuation refreshed"); return nil, nil })
 	mem := newReadOnlyResource("Mem", "/proc/meminfo", func(*domain.HandlerRequest) ([]byte, error) { return []byte("mem"), nil })
 	key := resourceViewKey(req)

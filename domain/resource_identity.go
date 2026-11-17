@@ -19,6 +19,7 @@ type ResourceViewIdentity struct {
 	CgroupV2 string
 	CgroupV1 map[string]string
 	Pidns    string
+	Err      error
 }
 
 func (r *HandlerRequest) ResourceView(load func() ResourceViewIdentity) ResourceViewIdentity {

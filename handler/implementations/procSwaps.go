@@ -185,6 +185,9 @@ func (h *ProcSwaps) readSwaps(
 	req *domain.HandlerRequest) (int, error) {
 
 	logrus.Debugf("Executing %v Read() method", h.Name)
+	if err := requireRequestResourceView(req); err != nil {
+		return 0, err
+	}
 
 	data, err := h.snapshots.get(resourceViewKey(req), resourceOwnerKey(req), req.ResourceOwner,
 		req.Offset > 0, time.Now(), resourceCacheTTL(req, resourceSnapshotTTL), func() ([]byte, error) {
