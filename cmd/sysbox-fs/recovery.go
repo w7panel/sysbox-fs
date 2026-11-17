@@ -36,6 +36,7 @@ type recoveryRunner struct {
 	}
 	css                                             domain.ContainerStateServiceIface
 	root                                            string
+	recordsMu                                       sync.RWMutex
 	records                                         map[uint32][]state.RestartContainer
 	repairMu                                        sync.Mutex
 	statsMu                                         sync.Mutex
@@ -228,6 +229,52 @@ func (r *recoveryRunner) refreshMountPolicy(id string, paths []string, refresh f
 	return nil
 }
 
+func (r *recoveryRunner) checkpointContainers() []state.RestartContainer {
+	r.recordsMu.RLock()
+	defer r.recordsMu.RUnlock()
+	seen := make(map[string]bool)
+	var containers []state.RestartContainer
+	for _, owners := range r.records {
+		for _, c := range owners {
+			if !seen[c.ID] {
+				seen[c.ID] = true
+				containers = append(containers, c)
+			}
+		}
+	}
+	return containers
+}
+
+func (r *recoveryRunner) forgetRecords(dead map[string]bool) {
+	if len(dead) == 0 {
+		return
+	}
+	r.recordsMu.Lock()
+	for dev, owners := range r.records {
+		kept := owners[:0]
+		for _, c := range owners {
+			if !dead[c.ID] {
+				kept = append(kept, c)
+			}
+		}
+		if len(kept) == 0 {
+			delete(r.records, dev)
+		} else {
+			r.records[dev] = kept
+		}
+	}
+	r.recordsMu.Unlock()
+	for id := range dead {
+		r.fallbackDone.Delete(id)
+	}
+}
+
+func (r *recoveryRunner) recordOwners(device uint32) []state.RestartContainer {
+	r.recordsMu.RLock()
+	defer r.recordsMu.RUnlock()
+	return append([]state.RestartContainer(nil), r.records[device]...)
+}
+
 func (r *recoveryRunner) run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -246,33 +293,31 @@ func (r *recoveryRunner) run(ctx context.Context) error {
 				r.statsMu.Lock()
 				r.faultCounts = make(map[faultProcess]int)
 				r.statsMu.Unlock()
-				seen := make(map[string]bool)
-				for _, owners := range r.records {
-					for _, c := range owners {
-						if seen[c.ID] {
-							continue
-						}
-						seen[c.ID] = true
-						start, err := state.ProcessStartTime(c.PID)
-						if err != nil || start != c.StartTime {
-							continue
-						}
-						r.repairSilentNamespaces(ctx, c)
-						if _, done := r.fallbackDone.Load(c.ID); done {
-							continue
-						}
-						// Only checkpointed, disconnected devices are eligible. Inspect
-						// mount metadata directly rather than block on a FUSE stat.
-						if result := r.repair(ctx, c.PID, c, c.Devices); result != repairFailed && result != repairUnsupported {
-							r.fallbackDone.Store(c.ID, struct{}{})
-						}
+				dead := make(map[string]bool)
+				candidates := 0
+				for _, c := range r.checkpointContainers() {
+					start, err := state.ProcessStartTime(c.PID)
+					if r.css.ContainerLookupById(c.ID) == nil || err != nil || start != c.StartTime {
+						dead[c.ID] = true
+						continue
+					}
+					candidates++
+					r.repairSilentNamespaces(ctx, c)
+					if _, done := r.fallbackDone.Load(c.ID); done {
+						continue
+					}
+					// Only checkpointed, disconnected devices are eligible. Inspect
+					// mount metadata directly rather than block on a FUSE stat.
+					if result := r.repair(ctx, c.PID, c, c.Devices); result != repairFailed && result != repairUnsupported {
+						r.fallbackDone.Store(c.ID, struct{}{})
 					}
 				}
+				r.forgetRecords(dead)
 				r.statsMu.Lock()
 				r.fallbackScanDuration += time.Since(scanStarted)
 				r.fallbackScanCount++
-				r.fallbackScanCandidates = len(seen)
-				logrus.WithFields(logrus.Fields{"attempts": r.attempts, "successes": r.succeeded, "failures": r.failed, "old_fd_events": r.stale, "unsupported": r.skipped, "scan_candidates": len(seen), "scan_duration_ms": time.Since(scanStarted).Milliseconds()}).Info("FUSE recovery counters")
+				r.fallbackScanCandidates = candidates
+				logrus.WithFields(logrus.Fields{"attempts": r.attempts, "successes": r.succeeded, "failures": r.failed, "old_fd_events": r.stale, "unsupported": r.skipped, "scan_candidates": candidates, "scan_duration_ms": time.Since(scanStarted).Milliseconds()}).Info("FUSE recovery counters")
 				r.statsMu.Unlock()
 			}
 		}
@@ -361,7 +406,7 @@ func (r *recoveryRunner) handleFault(ctx context.Context, fault recovery.Fault) 
 	if _, done := r.repaired.Load(key); done {
 		return
 	}
-	owners := r.records[fault.Device]
+	owners := r.recordOwners(fault.Device)
 	for _, c := range owners {
 		pid, err := recoveryPID(ctx, fault, c)
 		if err != nil {
