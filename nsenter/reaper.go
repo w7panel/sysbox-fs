@@ -26,17 +26,27 @@ import (
 )
 
 type zombieReaper struct {
-	mu     sync.RWMutex
+	mu     *sync.RWMutex
 	signal chan bool
+}
+
+var childWaitMu sync.RWMutex
+
+// ProtectChildWait keeps the nsenter reaper from claiming a child that another
+// subsystem started and must wait for itself.
+func ProtectChildWait() func() {
+	childWaitMu.RLock()
+	return childWaitMu.RUnlock
 }
 
 func newZombieReaper() *zombieReaper {
 
 	zr := &zombieReaper{
+		mu:     &childWaitMu,
 		signal: make(chan bool),
 	}
 
-	go reaper(zr.signal, &zr.mu)
+	go reaper(zr.signal, zr.mu)
 	return zr
 }
 

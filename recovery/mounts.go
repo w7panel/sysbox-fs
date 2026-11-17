@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/moby/sys/mountinfo"
+	"github.com/nestybox/sysbox-fs/nsenter"
 	"golang.org/x/sys/unix"
 )
 
@@ -394,6 +395,7 @@ func RepairMounts(ctx context.Context, pid int, base, containerID string, allowe
 	var output, diagnostics bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &diagnostics
+	unlockReaper := nsenter.ProtectChildWait()
 	err = cmd.Start()
 	if err == nil {
 		pid := uint32(cmd.Process.Pid)
@@ -406,6 +408,7 @@ func RepairMounts(ctx context.Context, pid int, base, containerID string, allowe
 			err = writeErr
 		}
 	}
+	unlockReaper()
 	var completed []string
 	decodeErr := json.Unmarshal(output.Bytes(), &completed)
 	if err != nil {

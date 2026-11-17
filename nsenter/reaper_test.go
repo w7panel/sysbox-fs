@@ -99,3 +99,19 @@ func TestReapProcessAsyncReleasesCallerPromptly(t *testing.T) {
 		t.Fatalf("child exited prematurely: reapProcessAsync should not wait synchronously: %v", err)
 	}
 }
+
+func TestReaperDoesNotClaimRecoveryChild(t *testing.T) {
+	zr := newZombieReaper()
+	unlock := ProtectChildWait()
+	defer unlock()
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	zr.nsenterReapReq()
+	time.Sleep(50 * time.Millisecond)
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("reaper claimed a child waited by another subsystem: %v", err)
+	}
+}
