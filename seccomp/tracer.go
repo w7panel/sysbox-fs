@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/nestybox/sysbox-fs/domain"
 	unixIpc "github.com/nestybox/sysbox-ipc/unix"
@@ -475,11 +476,23 @@ func (t *syscallTracer) pollSession(session seccompSession) {
 			break
 		}
 
-		// Exit the polling loop whenever the received event on the seccomp-fd is not
-		// the expected one.
-		if fds[0].Revents != unix.POLLIN {
-			logrus.Debugf("Non-POLLIN event received on fd %d, pid %d, cntr %s",
+		// seccomp_notify_poll() can report POLLERR when its notify lock is
+		// interrupted; the listener is still valid in that case.
+		if isTransientSeccompPollEvent(fds[0].Revents) {
+			logrus.Debugf("Transient POLLERR on seccomp fd %d, pid %d, cntr %s",
 				fd, pid, formatter.ContainerID{cntrID})
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+
+		if fds[0].Revents&(unix.POLLHUP|unix.POLLNVAL) != 0 {
+			logrus.Debugf("Terminal poll event %#x on seccomp fd %d, pid %d, cntr %s; closing listener",
+				fds[0].Revents, fd, pid, formatter.ContainerID{cntrID})
+			break
+		}
+		if fds[0].Revents&unix.POLLIN == 0 {
+			logrus.Warnf("Unexpected poll event %#x on seccomp fd %d, pid %d, cntr %s; closing listener",
+				fds[0].Revents, fd, pid, formatter.ContainerID{cntrID})
 			break
 		}
 
@@ -513,6 +526,10 @@ func (t *syscallTracer) pollSession(session seccompSession) {
 
 	t.seccompSessionDelete(session)
 
+}
+
+func isTransientSeccompPollEvent(events int16) bool {
+	return events&unix.POLLERR != 0 && events&(unix.POLLIN|unix.POLLHUP|unix.POLLNVAL) == 0
 }
 
 func isStaleSeccompNotification(err error) bool {

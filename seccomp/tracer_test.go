@@ -26,6 +26,7 @@ import (
 	"github.com/nestybox/sysbox-fs/mocks"
 	unixIpc "github.com/nestybox/sysbox-ipc/unix"
 	libseccomp "github.com/seccomp/libseccomp-golang"
+	"golang.org/x/sys/unix"
 )
 
 type countingMemParser struct {
@@ -115,6 +116,24 @@ func TestIsStaleSeccompNotification(t *testing.T) {
 
 	if isStaleSeccompNotification(syscall.EPERM) {
 		t.Fatal("EPERM notification error should not be treated as stale")
+	}
+}
+
+func TestIsTransientSeccompPollEvent(t *testing.T) {
+	for _, tt := range []struct {
+		events int16
+		want   bool
+	}{
+		{unix.POLLERR, true},
+		{unix.POLLERR | unix.POLLIN, false},
+		{unix.POLLIN, false},
+		{unix.POLLHUP, false},
+		{unix.POLLNVAL, false},
+		{unix.POLLERR | unix.POLLHUP, false},
+	} {
+		if got := isTransientSeccompPollEvent(tt.events); got != tt.want {
+			t.Errorf("isTransientSeccompPollEvent(%#x) = %t, want %t", tt.events, got, tt.want)
+		}
 	}
 }
 
