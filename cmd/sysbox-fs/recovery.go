@@ -281,6 +281,18 @@ func (r *recoveryRunner) pruneSilentNamespaces(id string, namespaces map[uint64]
 	}
 }
 
+func (r *recoveryRunner) pruneRepaired(active map[faultMount]bool, complete bool) {
+	if !complete {
+		return
+	}
+	r.repaired.Range(func(key, _ interface{}) bool {
+		if !active[key.(faultMount)] {
+			r.repaired.Delete(key)
+		}
+		return true
+	})
+}
+
 func (r *recoveryRunner) recordOwners(device uint32) []state.RestartContainer {
 	r.recordsMu.RLock()
 	defer r.recordsMu.RUnlock()
@@ -306,6 +318,8 @@ func (r *recoveryRunner) run(ctx context.Context) error {
 				r.faultCounts = make(map[faultProcess]int)
 				r.statsMu.Unlock()
 				dead := make(map[string]bool)
+				active := make(map[faultMount]bool)
+				complete := true
 				candidates := 0
 				for _, c := range r.checkpointContainers() {
 					start, err := state.ProcessStartTime(c.PID)
@@ -314,7 +328,16 @@ func (r *recoveryRunner) run(ctx context.Context) error {
 						continue
 					}
 					candidates++
-					r.repairSilentNamespaces(ctx, c)
+					namespaces, err := r.repairSilentNamespaces(ctx, c)
+					if err != nil {
+						complete = false
+					} else {
+						for namespace := range namespaces {
+							for _, device := range c.Devices {
+								active[faultMount{namespace, device}] = true
+							}
+						}
+					}
 					if _, done := r.fallbackDone.Load(c.ID); done {
 						continue
 					}
@@ -325,6 +348,7 @@ func (r *recoveryRunner) run(ctx context.Context) error {
 					}
 				}
 				r.forgetRecords(dead)
+				r.pruneRepaired(active, complete)
 				r.statsMu.Lock()
 				r.fallbackScanDuration += time.Since(scanStarted)
 				r.fallbackScanCount++
@@ -433,20 +457,21 @@ func (r *recoveryRunner) handleFault(ctx context.Context, fault recovery.Fault) 
 	}
 }
 
-func (r *recoveryRunner) repairSilentNamespaces(ctx context.Context, c state.RestartContainer) {
+func (r *recoveryRunner) repairSilentNamespaces(ctx context.Context, c state.RestartContainer) (map[uint64]uint32, error) {
 	root, err := containerCgroupRoot(c.PID)
 	if err != nil {
-		return
+		return nil, err
 	}
 	namespaces, err := findContainerNamespaces(ctx, root)
 	if err != nil {
 		logrus.WithError(err).WithField("container", c.ID).Warn("FUSE namespace fallback scan failed")
-		return
+		return nil, err
 	}
 	var outer unix.Stat_t
-	if unix.Stat(fmt.Sprintf("/proc/%d/ns/mnt", c.PID), &outer) != nil {
-		return
+	if err := unix.Stat(fmt.Sprintf("/proc/%d/ns/mnt", c.PID), &outer); err != nil {
+		return nil, err
 	}
+	namespaces[outer.Ino] = c.PID
 	r.pruneSilentNamespaces(c.ID, namespaces)
 	for namespace, pid := range namespaces {
 		if namespace != outer.Ino {
@@ -464,6 +489,7 @@ func (r *recoveryRunner) repairSilentNamespaces(ctx context.Context, c state.Res
 			}
 		}
 	}
+	return namespaces, nil
 }
 
 func (r *recoveryRunner) metrics(w http.ResponseWriter, req *http.Request) {

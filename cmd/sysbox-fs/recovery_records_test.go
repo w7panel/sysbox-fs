@@ -49,6 +49,35 @@ func TestRecoveryPrunesExitedNestedNamespaces(t *testing.T) {
 	}
 }
 
+func TestRecoveryPrunesOnlyInactiveRepairedMountsAfterCompleteScan(t *testing.T) {
+	r := &recoveryRunner{}
+	exited := faultMount{10, 1}
+	shared := faultMount{20, 1}
+	deadOwner := faultMount{30, 2}
+	live := faultMount{40, 3}
+	for _, key := range []faultMount{exited, shared, deadOwner, live} {
+		r.repaired.Store(key, struct{}{})
+	}
+	active := map[faultMount]bool{shared: true, live: true}
+	r.pruneRepaired(active, false) // One live owner could not be enumerated.
+	for _, key := range []faultMount{exited, shared, deadOwner, live} {
+		if _, ok := r.repaired.Load(key); !ok {
+			t.Fatalf("incomplete scan removed mount %+v", key)
+		}
+	}
+	r.pruneRepaired(active, true)
+	for _, key := range []faultMount{exited, deadOwner} {
+		if _, ok := r.repaired.Load(key); ok {
+			t.Fatalf("inactive mount retained: %+v", key)
+		}
+	}
+	for _, key := range []faultMount{shared, live} {
+		if _, ok := r.repaired.Load(key); !ok {
+			t.Fatalf("live shared mount removed: %+v", key)
+		}
+	}
+}
+
 func TestRecoveryOwnersSurviveConcurrentPrune(t *testing.T) {
 	r := &recoveryRunner{records: map[uint32][]state.RestartContainer{
 		1: {{ID: "dead"}, {ID: "live"}},
