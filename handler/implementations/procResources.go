@@ -452,7 +452,7 @@ func readCPUOnline(req *domain.HandlerRequest) ([]byte, error) {
 	if count > 0 {
 		return []byte(cpuRangeForCount(count) + "\n"), nil
 	}
-	return hostFile("/sys/devices/system/cpu/online")
+	return cachedHostFile("/sys/devices/system/cpu/online")
 }
 
 func readCPUPresent(req *domain.HandlerRequest) ([]byte, error) {
@@ -460,7 +460,7 @@ func readCPUPresent(req *domain.HandlerRequest) ([]byte, error) {
 	if count > 0 {
 		return []byte(cpuRangeForCount(count) + "\n"), nil
 	}
-	return hostFile("/sys/devices/system/cpu/present")
+	return cachedHostFile("/sys/devices/system/cpu/present")
 }
 
 func readRawCPUSet(req *domain.HandlerRequest) (string, bool) {
@@ -484,7 +484,7 @@ func readCPUSetFromCgroup(cg cgroupView) (string, bool) {
 	if cpus, ok := cg.readV1("cpuset", "cpuset.cpus"); ok && cpus != "" {
 		return cpus, true
 	}
-	if data, err := hostFile("/sys/devices/system/cpu/online"); err == nil {
+	if data, err := cachedHostFile("/sys/devices/system/cpu/online"); err == nil {
 		return strings.TrimSpace(string(data)), true
 	}
 	return "", false

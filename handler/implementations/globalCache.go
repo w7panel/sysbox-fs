@@ -4,7 +4,7 @@ import "time"
 
 const globalCacheTTL = 30 * time.Second
 
-// Only immutable host inputs belong here. Callers must still derive CPU and
+// Only low-frequency host inputs belong here. Callers must still derive CPU and
 // disk views from the requesting process's cgroup, never cache those globally.
 var globalCache byteSnapshots
 
