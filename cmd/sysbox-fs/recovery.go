@@ -42,6 +42,7 @@ type recoveryRunner struct {
 	repaired                                        sync.Map
 	fallbackDone                                    sync.Map
 	silentDone                                      sync.Map
+	pendingMounts                                   map[string][]string
 	attempts, succeeded, failed, stale, skipped     uint64
 	faultEvents, frequentFaults, droppedFaultEvents uint64
 	duration                                        time.Duration
@@ -169,8 +170,10 @@ func (r *recoveryRunner) repair(ctx context.Context, pid uint32, c state.Restart
 	outerNS, outerErr := os.Stat(fmt.Sprintf("/proc/%d/ns/mnt", c.PID))
 	sameNamespace := targetErr == nil && outerErr == nil && os.SameFile(targetNS, outerNS)
 	paths, err := recovery.RepairMounts(ctx, int(pid), r.root, c.ID, devices)
-	if len(paths) > 0 && sameNamespace {
-		if refreshErr := state.RefreshRecoveredMounts(r.css, c.ID, paths); refreshErr != nil {
+	if sameNamespace {
+		if refreshErr := r.refreshMountPolicy(c.ID, paths, func(id string, paths []string) error {
+			return state.RefreshRecoveredMounts(r.css, id, paths)
+		}); refreshErr != nil {
 			err = fmt.Errorf("repair error: %v; refresh mount policy: %w", err, refreshErr)
 		}
 	}
@@ -205,6 +208,24 @@ func (r *recoveryRunner) repair(ctx context.Context, pid uint32, c state.Restart
 		r.statsMu.Unlock()
 		return repairUnchanged
 	}
+}
+
+// Keep replaced paths until the policy parser accepts them: a later mount
+// scan cannot rediscover a path whose disconnected mount was already replaced.
+func (r *recoveryRunner) refreshMountPolicy(id string, paths []string, refresh func(string, []string) error) error {
+	pending := append(r.pendingMounts[id], paths...)
+	if len(pending) == 0 {
+		return nil
+	}
+	if err := refresh(id, pending); err != nil {
+		if r.pendingMounts == nil {
+			r.pendingMounts = make(map[string][]string)
+		}
+		r.pendingMounts[id] = pending
+		return err
+	}
+	delete(r.pendingMounts, id)
+	return nil
 }
 
 func (r *recoveryRunner) run(ctx context.Context) error {
