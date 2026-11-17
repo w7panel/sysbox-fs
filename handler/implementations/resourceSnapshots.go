@@ -44,7 +44,7 @@ func (c *byteSnapshots) get(key, owner string, token *domain.ResourceOwner, cont
 					delete(c.entries, k)
 				}
 			}
-			c.nextPrune = now.Add(ttl)
+			c.nextPrune = now.Add(max(ttl, time.Minute))
 		}
 		c.mu.Unlock()
 	}

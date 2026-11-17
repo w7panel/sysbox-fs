@@ -35,11 +35,15 @@ func TestByteSnapshotsTTLAndContinuation(t *testing.T) {
 			if get("current", true, now.Add(2*ttl)) != "1" {
 				t.Fatal("continuation refreshed expired data")
 			}
-			if _, ok := cache.entries["unrelated"]; ok {
-				t.Fatal("expired unrelated data retained")
-			}
 			if get("current", false, now.Add(2*ttl)) != "3" {
 				t.Fatal("expired data was not refreshed")
+			}
+			if _, ok := cache.entries["unrelated"]; !ok {
+				t.Fatal("full-table cleanup ran before the prune interval")
+			}
+			get("trigger", false, now.Add(time.Minute))
+			if _, ok := cache.entries["unrelated"]; ok {
+				t.Fatal("expired unrelated data retained after prune interval")
 			}
 		})
 	}
@@ -255,6 +259,23 @@ func BenchmarkByteSnapshotsParallelHit1000(b *testing.B) {
 			cache.get("0", "owner", nil, false, now, time.Second, read)
 		}
 	})
+}
+
+func BenchmarkByteSnapshotsManyViews(b *testing.B) {
+	var cache byteSnapshots
+	now := time.Now()
+	read := func() ([]byte, error) { return []byte("data"), nil }
+	keys := make([]string, 1000)
+	for i := range keys {
+		keys[i] = fmt.Sprint(i)
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		now = now.Add(time.Millisecond)
+		if _, err := cache.get(keys[i%len(keys)], "owner", nil, false, now, resourceSnapshotTTL, read); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
 
 func TestResourceSnapshotContinuationSurvivesOtherResourcePrune(t *testing.T) {
