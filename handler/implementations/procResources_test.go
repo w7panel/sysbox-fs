@@ -582,3 +582,20 @@ func TestEnsureTrailingNewline(t *testing.T) {
 		t.Fatalf("ensureTrailingNewline() changed newline-terminated data: %q", got)
 	}
 }
+
+var benchmarkParsedCgroupView cgroupView
+
+func TestParseCgroupViewV1AndV2(t *testing.T) {
+	view := parseCgroupView([]byte("0::/unified\n2:cpu,cpuacct:/group\n3:memory:/group\n"))
+	if view.v2Path != "/unified" || view.v1["cpu"] != "/group" || view.v1["cpuacct"] != "/group" || view.v1["memory"] != "/group" {
+		t.Fatalf("unexpected cgroup view: %#v", view)
+	}
+}
+
+func BenchmarkParseCgroupV2(b *testing.B) {
+	data := []byte("0::/kubepods.slice/pod123/container456\n")
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchmarkParsedCgroupView = parseCgroupView(data)
+	}
+}

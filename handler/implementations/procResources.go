@@ -256,7 +256,7 @@ func cgroupForPid(pid uint32) cgroupView {
 }
 
 func parseCgroupView(data []byte) cgroupView {
-	view := cgroupView{v1: make(map[string]string)}
+	view := cgroupView{}
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		parts := strings.SplitN(line, ":", 3)
 		if len(parts) != 3 || !strings.HasPrefix(parts[2], "/") {
@@ -265,6 +265,9 @@ func parseCgroupView(data []byte) cgroupView {
 		if parts[1] == "" {
 			view.v2Path = filepath.Clean(parts[2])
 			continue
+		}
+		if view.v1 == nil {
+			view.v1 = make(map[string]string)
 		}
 		for _, ctrl := range strings.Split(parts[1], ",") {
 			view.v1[ctrl] = filepath.Clean(parts[2])
