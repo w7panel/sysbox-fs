@@ -221,7 +221,7 @@ func procUptimeData(req *domain.HandlerRequest, ctime, now time.Time) ([]byte, e
 		return nil, err
 	}
 	return procUptimeSnapshots.get(resourceViewKey(req), resourceOwnerKey(req), req.ResourceOwner,
-		req.Offset > 0, now, resourceCacheTTL(req, procUptimeSnapshotTTL), func() ([]byte, error) {
+		req.Offset > 0, now, resourceCacheTTL(procUptimeSnapshotTTL), func() ([]byte, error) {
 			uptime := containerUptime(ctime, now)
 			idle := containerIdleFromReq(req, uptime)
 			return []byte(fmt.Sprintf("%.2f %.2f\n", uptime, idle)), nil

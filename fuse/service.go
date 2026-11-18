@@ -119,7 +119,6 @@ func (fss *FuseServerService) CreateFuseServer(serveCntr, stateCntr domain.Conta
 	)
 
 	srv.(*fuseServer).resourceOwner = fss.hds.AcquireResourceOwner(stateCntr)
-	srv.(*fuseServer).cachePolicy, _ = serveCntr.(domain.ResourceCachePolicyContainer)
 	initialized := false
 	defer func() {
 		if !initialized {

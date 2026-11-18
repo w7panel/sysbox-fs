@@ -87,6 +87,10 @@ func mountPlan(reader io.Reader, allowed []Device) ([]mountReplacement, error) {
 	for _, dev := range allowed {
 		devices[dev] = true
 	}
+	byID := make(map[int]*mountinfo.Info, len(mounts))
+	for _, mount := range mounts {
+		byID[mount.ID] = mount
+	}
 	var plan []mountReplacement
 	for _, mount := range mounts {
 		if mount.FSType != "fuse" || mount.Source != "sysboxfs" || !devices[Device{uint32(mount.Major), uint32(mount.Minor)}] {
@@ -96,14 +100,18 @@ func mountPlan(reader io.Reader, allowed []Device) ([]mountReplacement, error) {
 			return nil, fmt.Errorf("invalid FUSE mount path")
 		}
 		item := mountReplacement{device: Device{uint32(mount.Major), uint32(mount.Minor)}, ID: mount.ID, Target: mount.Mountpoint, Root: mount.Root, Propagation: unix.MS_PRIVATE}
+		// move_mount attaches over the target through its parent mount. A shared
+		// parent would propagate the replacement to peers outside this namespace.
+		if parent := byID[mount.Parent]; parent != nil {
+			for _, option := range strings.Fields(parent.Optional) {
+				if strings.HasPrefix(option, "shared:") {
+					return nil, fmt.Errorf("%w: parent of %s is shared", ErrUnsupportedPropagation, item.Target)
+				}
+			}
+		}
 		for _, option := range strings.Fields(mount.Optional) {
 			if option == "unbindable" {
 				item.Propagation = unix.MS_UNBINDABLE
-				continue
-			}
-			// A new FUSE superblock cannot join the old mount's propagation group.
-			if strings.HasPrefix(option, "shared:") || strings.HasPrefix(option, "master:") || strings.HasPrefix(option, "propagate_from:") {
-				return nil, fmt.Errorf("%w: mount %s has %s", ErrUnsupportedPropagation, item.Target, option)
 			}
 		}
 		for _, option := range strings.Split(mount.Options, ",") {

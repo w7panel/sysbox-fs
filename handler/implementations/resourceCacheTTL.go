@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"sync/atomic"
 	"time"
-
-	"github.com/nestybox/sysbox-fs/domain"
 )
 
 var resourceCacheOverride atomic.Int64
@@ -24,13 +22,10 @@ func ConfigureResourceCacheTTL(ttl time.Duration, explicit bool) error {
 	return nil
 }
 
-func resourceCacheTTL(req *domain.HandlerRequest, fallback time.Duration) time.Duration {
+func resourceCacheTTL(fallback time.Duration) time.Duration {
 	ttl := fallback
 	if override := resourceCacheOverride.Load(); override > 0 {
 		ttl = time.Duration(override)
-	}
-	if req != nil && req.ResourceCacheTTL > 0 && req.ResourceCacheTTL < ttl {
-		ttl = req.ResourceCacheTTL
 	}
 	return ttl
 }

@@ -46,9 +46,13 @@ func TestMountPlanWhitelistAndAttributes(t *testing.T) {
 	}
 	for _, option := range []string{"shared:2", "master:3", "propagate_from:4"} {
 		line := strings.Replace(strings.Split(input, "\n")[0], " - ", " "+option+" - ", 1)
-		if _, err := mountPlan(strings.NewReader(line), []Device{{0, 21}}); !errors.Is(err, ErrUnsupportedPropagation) {
-			t.Fatal("accepted unsupported propagation", option)
+		if plan, err := mountPlan(strings.NewReader(line), []Device{{0, 21}}); err != nil || len(plan) != 1 {
+			t.Fatal("rejected target propagation", option, err)
 		}
+	}
+	sharedParent := "1 0 0:1 / /proc rw shared:2 - proc proc rw\n" + input
+	if _, err := mountPlan(strings.NewReader(sharedParent), []Device{{0, 21}}); !errors.Is(err, ErrUnsupportedPropagation) {
+		t.Fatal("accepted shared parent", err)
 	}
 	nested := input + "14 10 0:33 / /proc/meminfo/child rw - tmpfs tmpfs rw\n"
 	if plan, err := mountPlan(strings.NewReader(nested), []Device{{0, 21}}); err != nil || len(plan[0].Children) != 1 {
@@ -160,6 +164,11 @@ func TestMountRecoveryPrivileged(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := unix.Mount("", target, "", unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY|unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
+		t.Fatal(err)
+	}
+	// The target's own shared flag does not propagate an overmount; its parent
+	// is private in this isolated namespace.
+	if err := unix.Mount("", target, "", unix.MS_SHARED, ""); err != nil {
 		t.Fatal(err)
 	}
 	tree := filepath.Join(dir, "tree")

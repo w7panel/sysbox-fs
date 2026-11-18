@@ -23,7 +23,6 @@ type RestartState struct {
 }
 
 type RestartContainer struct {
-	ResourceCacheTTL           time.Duration
 	Devices                    []uint32
 	Mounts                     []*domain.MountInfo
 	ID                         string
@@ -78,7 +77,7 @@ func ReadRestart(path string) (*RestartState, error) {
 	}
 	seen := make(map[string]bool)
 	for _, c := range s.Containers {
-		if !validRestartID(c.ID) || !validRestartID(c.SharedState) || c.PID == 0 || c.StartTime == 0 || len(c.Devices) == 0 || c.ResourceCacheTTL < 0 || seen[c.ID] {
+		if !validRestartID(c.ID) || !validRestartID(c.SharedState) || c.PID == 0 || c.StartTime == 0 || len(c.Devices) == 0 || seen[c.ID] {
 			return nil, fmt.Errorf("invalid FS checkpoint container %q", c.ID)
 		}
 		paths := make(map[string]bool)
@@ -119,7 +118,7 @@ func SaveRestart(service domain.ContainerStateServiceIface, shared func(string) 
 		c.intLock.RLock()
 		r := RestartContainer{ID: c.id, PID: c.initPid, StartTime: start, Ctime: c.ctime,
 			UID: c.uidFirst, UIDSize: c.uidSize, GID: c.gidFirst, GIDSize: c.gidSize,
-			ProcRO: append([]string(nil), c.procRoPaths...), ProcMask: append([]string(nil), c.procMaskPaths...), ResourceCacheTTL: c.ResourceCacheTTL()}
+			ProcRO: append([]string(nil), c.procRoPaths...), ProcMask: append([]string(nil), c.procMaskPaths...)}
 		r.Devices = append([]uint32(nil), c.recoveryDevices...)
 		r.Identity = c.resourceIdentity
 		if c.mountInfoParser != nil {
@@ -242,7 +241,6 @@ func RestoreRestart(service domain.ContainerStateServiceIface, s *RestartState) 
 		} // Never attach state to a reused PID.
 		c := newContainer(r.ID, r.PID, r.Ctime, r.UID, r.UIDSize, r.GID, r.GIDSize, r.ProcRO, r.ProcMask, css).(*container)
 		c.SetResourceIdentity(r.Identity)
-		c.SetResourceCacheTTL(r.ResourceCacheTTL)
 		initialized := &container{id: r.ID, service: css}
 		if err := initialized.update(c); err != nil {
 			return err

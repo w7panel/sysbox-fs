@@ -190,7 +190,7 @@ func (h *ProcSwaps) readSwaps(
 	}
 
 	data, err := h.snapshots.get(resourceViewKey(req), resourceOwnerKey(req), req.ResourceOwner,
-		req.Offset > 0, time.Now(), resourceCacheTTL(req, resourceSnapshotTTL), func() ([]byte, error) {
+		req.Offset > 0, time.Now(), resourceCacheTTL(resourceSnapshotTTL), func() ([]byte, error) {
 			return procSwapsData(req), nil
 		})
 	if err != nil {

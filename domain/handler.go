@@ -19,7 +19,6 @@ package domain
 import (
 	"os"
 	"sync"
-	"time"
 )
 
 // HandlerBase is a type common to all the handlers.
@@ -80,7 +79,6 @@ type EmuResource struct {
 
 // HandlerRequest represents a request to be processed by a handler
 type HandlerRequest struct {
-	ResourceCacheTTL time.Duration
 	resourceViewOnce sync.Once
 	resourceView     ResourceViewIdentity
 	ResourceOwner    *ResourceOwner

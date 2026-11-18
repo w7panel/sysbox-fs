@@ -17,9 +17,7 @@
 package ipc
 
 import (
-	"fmt"
 	"github.com/sirupsen/logrus"
-	"time"
 
 	"github.com/nestybox/sysbox-fs/domain"
 	grpc "github.com/nestybox/sysbox-ipc/sysboxFsGrpc"
@@ -102,13 +100,6 @@ func ContainerRegister(ctx interface{}, data *grpc.ContainerData) error {
 		seeded.SetResourceIdentity(domain.ResourceIdentity{
 			CgroupData: data.CgroupData, Pidns: data.Pidns, InitStartTime: data.InitStartTime,
 		})
-	}
-
-	if data.ResourceCacheTtlNanos < 0 {
-		return fmt.Errorf("resource cache TTL must not be negative")
-	}
-	if policy, ok := cntr.(domain.ResourceCachePolicyContainer); ok {
-		policy.SetResourceCacheTTL(time.Duration(data.ResourceCacheTtlNanos))
 	}
 
 	err := ipcService.css.ContainerRegister(cntr)

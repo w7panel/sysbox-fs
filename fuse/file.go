@@ -247,10 +247,6 @@ func (f *File) Read(
 		ResourceOwner: f.server.resourceOwner,
 	}
 
-	if f.server.cachePolicy != nil {
-		handlerReq.ResourceCacheTTL = f.server.cachePolicy.ResourceCacheTTL()
-	}
-
 	// Handler execution.
 	n, err := handler.Read(ionode, handlerReq)
 	if err != nil && err != io.EOF {

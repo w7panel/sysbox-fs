@@ -22,7 +22,6 @@ import (
 	"io"
 	"os"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/nestybox/sysbox-fs/domain"
@@ -33,7 +32,6 @@ import (
 
 // Container type to represent all the container-state relevant to sysbox-fs.
 type container struct {
-	resourceCacheTTL atomic.Int64
 	recoveryDevices  []uint32
 	resourceIdentity domain.ResourceIdentity
 	sync.RWMutex
@@ -298,9 +296,6 @@ func (c *container) update(src *container) error {
 	if err := validateResourceIdentity(src.initPid, src.resourceIdentity); err != nil {
 		return err
 	}
-	if ttl := src.ResourceCacheTTL(); c.initPid != src.initPid || ttl > 0 {
-		c.SetResourceCacheTTL(ttl)
-	}
 	if c.initPid != src.initPid || src.resourceIdentity != (domain.ResourceIdentity{}) {
 		c.resourceIdentity = src.resourceIdentity
 	}
@@ -536,14 +531,4 @@ func validateResourceIdentity(pid uint32, identity domain.ResourceIdentity) erro
 		}
 	}
 	return nil
-}
-
-func (c *container) ResourceCacheTTL() time.Duration {
-	// FUSE reads also run while InitializeMountInfo waits for an nsenter helper.
-	// They must not acquire intLock, which that caller holds.
-	return time.Duration(c.resourceCacheTTL.Load())
-}
-
-func (c *container) SetResourceCacheTTL(ttl time.Duration) {
-	c.resourceCacheTTL.Store(int64(ttl))
 }

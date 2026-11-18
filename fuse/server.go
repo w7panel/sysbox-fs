@@ -32,7 +32,6 @@ import (
 
 // FuseServer class in charge of running/hosting sysbox-fs' FUSE server features.
 type fuseServer struct {
-	cachePolicy     domain.ResourceCachePolicyContainer
 	resourceOwner   *domain.ResourceOwner
 	resourceRelease sync.Once
 	sync.RWMutex                             // nodeDB protection

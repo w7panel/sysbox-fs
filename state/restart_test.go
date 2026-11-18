@@ -1,7 +1,6 @@
 package state
 
 import (
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -31,7 +30,7 @@ func restartFixture(t *testing.T) *RestartState {
 		t.Fatal(err)
 	}
 	return &RestartState{Version: 1, BootID: strings.TrimSpace(string(boot)), Clean: true, Containers: []RestartContainer{{
-		ID: "container", SharedState: "exited-original-owner", PID: pid, StartTime: start, Devices: []uint32{21}, ResourceCacheTTL: 23 * time.Millisecond,
+		ID: "container", SharedState: "exited-original-owner", PID: pid, StartTime: start, Devices: []uint32{21},
 		Ctime: time.Unix(100, 0), UID: 100000, UIDSize: 65536, GID: 100001, GIDSize: 65536,
 		ProcRO: []string{"/proc/sys"}, ProcMask: []string{"/proc/kcore"},
 		Data:   map[string][]byte{"/proc/sys/kernel/hostname": []byte("original")},
@@ -58,7 +57,6 @@ func TestRestartCheckpointValidation(t *testing.T) {
 		{"parent id", func(s *RestartState) { s.Containers[0].ID = ".." }, false},
 		{"no shared state", func(s *RestartState) { s.Containers[0].SharedState = "" }, false},
 		{"no devices", func(s *RestartState) { s.Containers[0].Devices = nil }, false},
-		{"negative ttl", func(s *RestartState) { s.Containers[0].ResourceCacheTTL = -1 }, false},
 		{"nil policy", func(s *RestartState) { s.Containers[0].Mounts = []*domain.MountInfo{nil} }, false},
 		{"duplicate id", func(s *RestartState) { s.Containers = append(s.Containers, s.Containers[0]) }, false},
 	} {
@@ -106,7 +104,7 @@ func restartService(t *testing.T) (*containerStateService, *mocks.FuseServerServ
 	return css, fuse
 }
 
-func TestRestoreSharedStateTTLAndOriginalMountPolicy(t *testing.T) {
+func TestRestoreSharedStateAndOriginalMountPolicy(t *testing.T) {
 	state := restartFixture(t)
 	sibling := state.Containers[0]
 	sibling.ID = "sibling"
@@ -122,7 +120,7 @@ func TestRestoreSharedStateTTLAndOriginalMountPolicy(t *testing.T) {
 		t.Fatal("lost shared owner after original member exit")
 	}
 	for _, c := range css.idTable {
-		if c.ResourceCacheTTL() != 23*time.Millisecond || !c.IsRegistrationCompleted() || !c.Ctime().Equal(state.Containers[0].Ctime) {
+		if !c.IsRegistrationCompleted() || !c.Ctime().Equal(state.Containers[0].Ctime) {
 			t.Fatal("lost metadata")
 		}
 		if !c.IsImmutableMountID(42) || c.IsImmutableMountID(999) {
@@ -185,17 +183,5 @@ func TestSaveRejectsMissingFuseSession(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("wrote invalid checkpoint")
-	}
-	// The serialized schema must retain nanosecond TTL without precision loss.
-	encoded, err := json.Marshal(fixture)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var roundtrip RestartContainer
-	if err := json.Unmarshal(encoded, &roundtrip); err != nil {
-		t.Fatal(err)
-	}
-	if roundtrip.ResourceCacheTTL != fixture.ResourceCacheTTL {
-		t.Fatal("TTL not persisted")
 	}
 }

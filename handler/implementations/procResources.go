@@ -168,7 +168,7 @@ func (h *readOnlyResource) snapshotData(req *domain.HandlerRequest) ([]byte, err
 		return nil, err
 	}
 	return h.snapshots.get(resourceViewKey(req), resourceOwnerKey(req), req.ResourceOwner,
-		req.Offset > 0, time.Now(), resourceCacheTTL(req, resourceSnapshotTTL), func() ([]byte, error) { return h.read(req) })
+		req.Offset > 0, time.Now(), resourceCacheTTL(resourceSnapshotTTL), func() ([]byte, error) { return h.read(req) })
 }
 
 func (h *readOnlyResource) ReleaseResourceSnapshots(owner string) {
