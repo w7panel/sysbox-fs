@@ -25,8 +25,9 @@ recover; already-open descriptors remain attached to the disconnected session.
 No host `/proc` passthrough is used.
 
 This is same-boot graceful replacement, not crash recovery. A dirty checkpoint,
-PID reuse, unknown prior mounts, incomplete registration, shared/slave propagation
-or a replacement hiding child mounts is rejected. The first installation over a
+PID reuse, unknown prior mounts, incomplete registration, a shared parent of a
+replacement target, unsupported child-mount propagation, or a replacement
+hiding child mounts is rejected. The first installation over a
 legacy daemon requires recreating its affected containers: that daemon has neither
 a checkpoint nor retained listeners. Subsequent restart validation must preserve
 Pod UIDs and process identities, not recreate Pods to mask a recovery failure.

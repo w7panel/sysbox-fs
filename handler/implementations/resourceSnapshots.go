@@ -125,6 +125,9 @@ func resourceViewKeyFor(req *domain.HandlerRequest, cg cgroupView, ns string) st
 }
 
 func cgroupViewKey(cg cgroupView) string {
+	if len(cg.v1) == 0 {
+		return "v2\x00" + cg.v2Path
+	}
 	parts := []string{"v2", cg.v2Path}
 	controllers := make([]string, 0, len(cg.v1))
 	for controller := range cg.v1 {

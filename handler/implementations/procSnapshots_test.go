@@ -122,6 +122,14 @@ func TestCgroupViewKey(t *testing.T) {
 	}
 }
 
+func BenchmarkCgroupV2ViewKey(b *testing.B) {
+	view := cgroupView{v2Path: "/kubepods.slice/pod123/container456"}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = cgroupViewKey(view)
+	}
+}
+
 func TestResourceViewKeyIsolation(t *testing.T) {
 	a := &domain.HandlerRequest{Pid: uint32(os.Getpid()), ResourceOwner: &domain.ResourceOwner{ID: 1}}
 	b := &domain.HandlerRequest{Pid: a.Pid, ResourceOwner: &domain.ResourceOwner{ID: 2}}

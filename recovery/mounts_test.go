@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -301,6 +302,39 @@ func TestMountRecoveryPrivileged(t *testing.T) {
 	}
 	if _, err := RepairMounts(ctx, os.Getpid(), filepath.Join(dir, "new"), "container", allowed); err != nil {
 		t.Fatal("retry not idempotent", err)
+	}
+	// A silent disconnection has no read/open fault to drive the BPF path.
+	// The fallback must still be able to replace it and leave later scans idle.
+	silentPath := filepath.Join(dir, "silent")
+	if err := os.Mkdir(silentPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	silent := mountFS(silentPath, "silent")
+	silentTarget := filepath.Join(dir, "silent-target")
+	if err := os.WriteFile(silentTarget, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mount(filepath.Join(silentPath, "value"), silentTarget, "", unix.MS_BIND, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Stat(silentTarget, &stat); err != nil {
+		t.Fatal(err)
+	}
+	silentDevice := Device{uint32(unix.Major(stat.Dev)), uint32(unix.Minor(stat.Dev))}
+	if err := os.WriteFile(filepath.Join(control, fmt.Sprint(silentDevice.Minor), "abort"), []byte("1"), 0200); err != nil {
+		t.Fatal(err)
+	}
+	silent.Close()
+	paths, err := RepairMounts(ctx, os.Getpid(), filepath.Join(dir, "new"), "container", []Device{silentDevice})
+	if err != nil || !slices.Contains(paths, silentTarget) {
+		t.Fatalf("silent recovery paths=%v err=%v", paths, err)
+	}
+	if data, err := os.ReadFile(silentTarget); err != nil || string(data) != "new" {
+		t.Fatalf("silent recovery read=%q err=%v", data, err)
+	}
+	paths, err = RepairMounts(ctx, os.Getpid(), filepath.Join(dir, "new"), "container", []Device{silentDevice})
+	if err != nil || len(paths) != 0 {
+		t.Fatalf("silent recovery repeated paths=%v err=%v", paths, err)
 	}
 }
 
