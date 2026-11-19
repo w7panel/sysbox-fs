@@ -42,5 +42,6 @@ Local kernel tests (in addition to ordinary `go test -race ./...`):
 SYSBOX_RECOVERY_PRIVILEGED=1 go test -race ./recovery -v
 ```
 
-They use isolated FUSE servers and namespaces, verify fault events and cooldown,
+They use isolated FUSE servers and namespaces, verify first-fault and expired-cooldown
+deduplication under concurrent reads, batch recovery of two independent devices,
 new-open recovery, stale-descriptor failure, mount flags and retry idempotency.

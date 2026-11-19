@@ -127,8 +127,8 @@ func TestMountRecoveryPrivileged(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := os.Getenv("SYSBOX_RECOVERY_TEST_DIR")
-	oldPath, newPath := filepath.Join(dir, "old"), filepath.Join(dir, "new", "container")
-	for _, path := range []string{oldPath, newPath} {
+	oldPath, secondOldPath, newPath := filepath.Join(dir, "old"), filepath.Join(dir, "second-old"), filepath.Join(dir, "new", "container")
+	for _, path := range []string{oldPath, secondOldPath, newPath} {
 		if err := os.MkdirAll(path, 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -157,12 +157,20 @@ func TestMountRecoveryPrivileged(t *testing.T) {
 		return conn
 	}
 	old := mountFS(oldPath, "old")
+	secondOld := mountFS(secondOldPath, "second-old")
 	mountFS(newPath, "new")
 	target := filepath.Join(dir, "target")
 	if err := os.WriteFile(target, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := unix.Mount(filepath.Join(oldPath, "value"), target, "", unix.MS_BIND, ""); err != nil {
+		t.Fatal(err)
+	}
+	secondTarget := filepath.Join(dir, "second-target")
+	if err := os.WriteFile(secondTarget, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mount(filepath.Join(secondOldPath, "value"), secondTarget, "", unix.MS_BIND, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := unix.Mount("", target, "", unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY|unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
@@ -195,11 +203,22 @@ func TestMountRecoveryPrivileged(t *testing.T) {
 		t.Fatal(err)
 	}
 	allowed := []Device{{uint32(unix.Major(stat.Dev)), uint32(unix.Minor(stat.Dev))}}
+	if err := unix.Stat(secondTarget, &stat); err != nil {
+		t.Fatal(err)
+	}
+	allowed = append(allowed, Device{uint32(unix.Major(stat.Dev)), uint32(unix.Minor(stat.Dev))})
+	if allowed[0] == allowed[1] {
+		t.Fatal("independent FUSE mounts share a device")
+	}
 	oldFD, err := unix.Open(target, unix.O_RDONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, err := NewEvents([]uint32{allowed[0].Major<<20 | allowed[0].Minor})
+	secondOldFD, err := unix.Open(secondTarget, unix.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := NewEvents([]uint32{allowed[0].Major<<20 | allowed[0].Minor, allowed[1].Major<<20 | allowed[1].Minor})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,34 +238,52 @@ func TestMountRecoveryPrivileged(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(control, fmt.Sprint(allowed[0].Minor), "abort"), []byte("1"), 0200); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(control, fmt.Sprint(allowed[1].Minor), "abort"), []byte("1"), 0200); err != nil {
+		t.Fatal(err)
+	}
 	old.Close()
+	secondOld.Close()
 	defer unix.Close(oldFD)
-	if _, err := os.ReadFile(target); err == nil {
-		t.Fatal("disconnected mount unexpectedly readable")
+	defer unix.Close(secondOldFD)
+	var ns unix.Stat_t
+	if err := unix.Stat("/proc/self/ns/mnt", &ns); err != nil {
+		t.Fatal(err)
 	}
-	select {
-	case fault := <-faults:
-		var ns unix.Stat_t
-		if err := unix.Stat("/proc/self/ns/mnt", &ns); err != nil {
-			t.Fatal(err)
-		}
-		if fault.Device != allowed[0].Major<<20|allowed[0].Minor || fault.Namespace != ns.Ino {
-			t.Fatalf("incorrect fault identity: %+v", fault)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("no eBPF event for disconnected FUSE open")
-	}
-	var readers sync.WaitGroup
-	for i := 0; i < 64; i++ {
-		readers.Add(1)
-		go func() {
-			defer readers.Done()
-			if _, err := os.ReadFile(target); err == nil {
-				t.Error("disconnected mount unexpectedly readable during concurrent faults")
+	checkFault := func(device Device) {
+		t.Helper()
+		select {
+		case fault := <-faults:
+			if fault.Device != device.Major<<20|device.Minor || fault.Namespace != ns.Ino {
+				t.Fatalf("incorrect fault identity: %+v", fault)
 			}
-		}()
+		case <-time.After(2 * time.Second):
+			t.Fatal("no eBPF event for disconnected FUSE open")
+		}
 	}
-	readers.Wait()
+	burst := func(path string) {
+		start := make(chan struct{})
+		var readers sync.WaitGroup
+		for i := 0; i < 64; i++ {
+			readers.Add(1)
+			go func() {
+				defer readers.Done()
+				<-start
+				if _, err := os.ReadFile(path); err == nil {
+					t.Error("disconnected mount unexpectedly readable during concurrent faults")
+				}
+			}()
+		}
+		close(start)
+		readers.Wait()
+	}
+	if _, err := os.ReadFile(target); err == nil {
+		t.Fatal("disconnected mount unexpectedly readable", target)
+	}
+	checkFault(allowed[0])
+	// A fresh cooldown key must also suppress a simultaneous first fault burst.
+	burst(secondTarget)
+	checkFault(allowed[1])
+	burst(target)
 	select {
 	case fault := <-faults:
 		t.Fatalf("cooldown did not suppress %+v", fault)
@@ -254,16 +291,19 @@ func TestMountRecoveryPrivileged(t *testing.T) {
 	}
 	time.Sleep(time.Second)
 	_, _ = os.ReadFile(target)
+	checkFault(allowed[0])
+	burst(secondTarget)
+	checkFault(allowed[1])
 	select {
-	case <-faults:
-	case <-time.After(2 * time.Second):
-		t.Fatal("no event after cooldown")
+	case fault := <-faults:
+		t.Fatalf("expired cooldown emitted duplicates: %+v", fault)
+	case <-time.After(100 * time.Millisecond):
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	resultPath := filepath.Join(dir, "repair-result")
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestMountRecoveryForeignNamespace$", "-test.timeout=10s")
-	cmd.Env = append(os.Environ(), "SYSBOX_RECOVERY_FOREIGN_PID="+strconv.Itoa(os.Getpid()), "SYSBOX_RECOVERY_FOREIGN_DEVICE="+strconv.Itoa(int(allowed[0].Minor)), "SYSBOX_RECOVERY_FOREIGN_BASE="+filepath.Join(dir, "new"), "SYSBOX_RECOVERY_FOREIGN_RESULT="+resultPath)
+	cmd.Env = append(os.Environ(), "SYSBOX_RECOVERY_FOREIGN_PID="+strconv.Itoa(os.Getpid()), "SYSBOX_RECOVERY_FOREIGN_DEVICES="+fmt.Sprintf("%d,%d", allowed[0].Minor, allowed[1].Minor), "SYSBOX_RECOVERY_FOREIGN_BASE="+filepath.Join(dir, "new"), "SYSBOX_RECOVERY_FOREIGN_RESULT="+resultPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: unix.CLONE_NEWNS}
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("foreign namespace repair: %v: %s", err, output)
@@ -286,6 +326,9 @@ func TestMountRecoveryPrivileged(t *testing.T) {
 	if !foundChild {
 		t.Fatal("preserved child missing from mount-policy refresh paths")
 	}
+	if !slices.Contains(completed, target) || !slices.Contains(completed, secondTarget) {
+		t.Fatalf("batch repair missed a target: %v", completed)
+	}
 	retained, err := os.ReadFile(filepath.Join(child, "retained"))
 	if err != nil || string(retained) != "private-child" {
 		t.Fatalf("lost masked child: %q %v", retained, err)
@@ -298,8 +341,14 @@ func TestMountRecoveryPrivileged(t *testing.T) {
 	if err != nil || string(data) != "new" {
 		t.Fatalf("recovered open: %q %v", data, err)
 	}
+	if data, err := os.ReadFile(secondTarget); err != nil || string(data) != "new" {
+		t.Fatalf("second recovered open: %q %v", data, err)
+	}
 	if _, err := unix.Read(oldFD, make([]byte, 16)); err == nil {
 		t.Fatal("old descriptor unexpectedly repaired")
+	}
+	if _, err := unix.Read(secondOldFD, make([]byte, 16)); err == nil {
+		t.Fatal("second old descriptor unexpectedly repaired")
 	}
 	var flags unix.Statfs_t
 	if err := unix.Statfs(target, &flags); err != nil {
@@ -309,8 +358,8 @@ func TestMountRecoveryPrivileged(t *testing.T) {
 	if flags.Flags&expected != expected {
 		t.Fatalf("lost mount attributes: %x", flags.Flags)
 	}
-	if _, err := RepairMounts(ctx, os.Getpid(), filepath.Join(dir, "new"), "container", allowed); err != nil {
-		t.Fatal("retry not idempotent", err)
+	if paths, err := RepairMounts(ctx, os.Getpid(), filepath.Join(dir, "new"), "container", allowed); err != nil || len(paths) != 0 {
+		t.Fatalf("retry not idempotent: paths=%v err=%v", paths, err)
 	}
 	// A silent disconnection has no read/open fault to drive the BPF path.
 	// The fallback must still be able to replace it and leave later scans idle.
@@ -368,11 +417,15 @@ func TestMountRecoveryForeignNamespace(t *testing.T) {
 	if err != nil {
 		t.Skip("invoked only by privileged recovery test")
 	}
-	minor, err := strconv.Atoi(os.Getenv("SYSBOX_RECOVERY_FOREIGN_DEVICE"))
-	if err != nil {
-		t.Fatal(err)
+	var allowed []Device
+	for _, value := range strings.Split(os.Getenv("SYSBOX_RECOVERY_FOREIGN_DEVICES"), ",") {
+		minor, err := strconv.Atoi(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		allowed = append(allowed, Device{0, uint32(minor)})
 	}
-	paths, err := RepairMounts(context.Background(), pid, os.Getenv("SYSBOX_RECOVERY_FOREIGN_BASE"), "container", []Device{{0, uint32(minor)}})
+	paths, err := RepairMounts(context.Background(), pid, os.Getenv("SYSBOX_RECOVERY_FOREIGN_BASE"), "container", allowed)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -46,9 +46,18 @@ static __always_inline int identify(struct super_block *sb, struct event *e) {
 static __always_inline void emit(struct event *e, long ret) {
  if (ret != -5 && ret != -107) return;
  struct key key={.ns=e->ns,.dev=e->dev};
+ struct event *slot=bpf_ringbuf_reserve(&events,sizeof(*e),0);
+ if (!slot) return;
  __u64 now=bpf_ktime_get_ns(), *last=bpf_map_lookup_elem(&cooldown,&key);
- if (last && now-*last<1000000000ULL) return;
- if (bpf_ringbuf_output(&events,e,sizeof(*e),0)==0) bpf_map_update_elem(&cooldown,&key,&now,BPF_ANY);
+ if (last) {
+  __u64 previous=*last;
+  if (now-previous<1000000000ULL || __sync_val_compare_and_swap(last,previous,now)!=previous) goto discard;
+ } else if (bpf_map_update_elem(&cooldown,&key,&now,BPF_NOEXIST)) goto discard;
+ *slot=*e;
+ bpf_ringbuf_submit(slot,0);
+ return;
+discard:
+ bpf_ringbuf_discard(slot,0);
 }
 struct enter_read { __u64 unused; long id; unsigned long fd; };
 struct exit_read { __u64 unused; long id; long ret; };
