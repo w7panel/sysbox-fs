@@ -23,6 +23,7 @@ import (
 
 	bfuse "bazil.org/fuse"
 	bfusefs "bazil.org/fuse/fs"
+	"golang.org/x/sys/unix"
 
 	_ "bazil.org/fuse/fs/fstestutil"
 	"github.com/sirupsen/logrus"
@@ -180,7 +181,7 @@ func (s *fuseServer) Run() error {
 func (s *fuseServer) Destroy() error {
 
 	// Unmount sysboxfs from mountpoint.
-	err := bfuse.Unmount(s.mountPoint)
+	err := unmountFuse(s.mountPoint)
 	if err != nil {
 		logrus.Errorf("FUSE file-system could not be unmounted: %v", err)
 		return err
@@ -193,6 +194,17 @@ func (s *fuseServer) Destroy() error {
 	s.service = nil
 	s.conn = nil
 
+	return nil
+}
+
+func unmountFuse(path string) error {
+	if err := bfuse.Unmount(path); err != nil {
+		// An aborted FUSE connection can make fusermount3 reject the mount.
+		// Detach it during container teardown; EINVAL means it is already gone.
+		if err := unix.Unmount(path, unix.MNT_DETACH); err != nil && !errors.Is(err, unix.EINVAL) {
+			return err
+		}
+	}
 	return nil
 }
 

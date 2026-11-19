@@ -22,7 +22,6 @@ import (
 	"path/filepath"
 	"sync"
 
-	bfuse "bazil.org/fuse"
 	_ "bazil.org/fuse/fs/fstestutil"
 
 	"github.com/nestybox/sysbox-fs/domain"
@@ -242,7 +241,7 @@ func (fss *FuseServerService) DetachForRestart() error {
 	fss.RLock()
 	defer fss.RUnlock()
 	for _, server := range fss.serversMap {
-		if err := bfuse.Unmount(server.mountPoint); err != nil {
+		if err := unmountFuse(server.mountPoint); err != nil {
 			return err
 		}
 		if err := os.Remove(server.mountPoint); err != nil {
