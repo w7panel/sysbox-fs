@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -235,9 +236,17 @@ func TestMountRecoveryPrivileged(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("no eBPF event for disconnected FUSE open")
 	}
-	for i := 0; i < 50; i++ {
-		_, _ = os.ReadFile(target)
+	var readers sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			if _, err := os.ReadFile(target); err == nil {
+				t.Error("disconnected mount unexpectedly readable during concurrent faults")
+			}
+		}()
 	}
+	readers.Wait()
 	select {
 	case fault := <-faults:
 		t.Fatalf("cooldown did not suppress %+v", fault)
