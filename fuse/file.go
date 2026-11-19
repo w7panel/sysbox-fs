@@ -242,7 +242,7 @@ func (f *File) Read(
 		Uid:           req.Uid,
 		Gid:           req.Gid,
 		Offset:        req.Offset,
-		Data:          make([]byte, req.Size),
+		Data:          resp.Data[:req.Size],
 		Container:     f.server.container,
 		ResourceOwner: f.server.resourceOwner,
 	}
