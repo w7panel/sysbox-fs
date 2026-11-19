@@ -109,6 +109,16 @@ func (h *ProcSysFs) Lookup(
 
 		return info, nil
 	}
+	// sysbox-mgr mounts binfmt_misc here. Keep its mountpoint resolvable
+	// even when a freshly mounted procfs does not list the directory.
+	if resource == "binfmt_misc" {
+		return &domain.FileInfo{
+			Fname:    resource,
+			Fmode:    os.ModeDir | 0755,
+			FmodTime: time.Now(),
+			FisDir:   true,
+		}, nil
+	}
 
 	// If looked-up element hasn't been found by now, let's look into the actual
 	// sys container rootfs.
