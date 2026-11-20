@@ -19,5 +19,8 @@ func TestProcSysFsBinfmtMountpoint(t *testing.T) {
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeDir == 0 {
 			t.Fatalf("%s mountpoint: info=%v err=%v", name, info, err)
 		}
+		if name == "fs" && info.Mode().Perm() != 0555 {
+			t.Fatalf("fs parent mode = %o, want 0555", info.Mode().Perm())
+		}
 	}
 }

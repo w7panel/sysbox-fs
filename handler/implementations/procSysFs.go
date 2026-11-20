@@ -111,7 +111,15 @@ func (h *ProcSysFs) Lookup(
 	}
 	// Keep the fixed parent and sysbox-mgr's binfmt_misc mountpoint
 	// resolvable while a replacement FUSE tree is staged.
-	if resource == "fs" || resource == "binfmt_misc" {
+	if resource == "fs" && n.Path() == h.Path {
+		return &domain.FileInfo{
+			Fname:    resource,
+			Fmode:    os.ModeDir | 0555,
+			FmodTime: time.Now(),
+			FisDir:   true,
+		}, nil
+	}
+	if resource == "binfmt_misc" {
 		return &domain.FileInfo{
 			Fname:    resource,
 			Fmode:    os.ModeDir | 0755,
