@@ -66,12 +66,14 @@ var SysfsMounts = []string{
 // done inside the container's mount ns).
 func IsSysboxfsMount(path string) bool {
 	for _, mountPath := range ProcfsMounts {
-		if strings.HasPrefix(path, mountPath+"/") || path == mountPath {
+		if strings.HasPrefix(path, mountPath) &&
+			(len(path) == len(mountPath) || len(path) > len(mountPath) && path[len(mountPath)] == '/') {
 			return true
 		}
 	}
 	for _, mountPath := range SysfsMounts {
-		if strings.HasPrefix(path, mountPath+"/") || path == mountPath {
+		if strings.HasPrefix(path, mountPath) &&
+			(len(path) == len(mountPath) || len(path) > len(mountPath) && path[len(mountPath)] == '/') {
 			return true
 		}
 	}
