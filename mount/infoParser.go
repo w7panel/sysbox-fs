@@ -202,7 +202,7 @@ func (mi *mountInfoParser) parseComponents(data string) (*domain.MountInfo, erro
 		mount.VfsOptions =
 			mi.parseOptionsComponent(componentSplit[componentSplitLength-1])
 
-		if componentSplit[6] != "" {
+		if componentSplitLength > 10 {
 			mount.OptionalFields =
 				mi.parseOptFieldsComponent(componentSplit[6 : componentSplitLength-4])
 			if err != nil {
@@ -220,23 +220,17 @@ func (mi *mountInfoParser) parseOptionsComponent(s string) map[string]string {
 
 	optionsMap := make(map[string]string)
 
-	// Separate all mount options.
-	options := strings.Split(s, ",")
-	for _, opt := range options {
-
-		// Discern between binomial and monomial options.
-		optionSplit := strings.Split(opt, "=")
-
-		if len(optionSplit) >= 2 {
-			// Example: "... size=4058184k,mode=755"
-			key, value := optionSplit[0], optionSplit[1]
-			optionsMap[key] = value
-
-		} else {
-			// Example: "... rw,net_cls,net_prio"
-			key := optionSplit[0]
-			optionsMap[key] = ""
+	for {
+		opt, rest, more := strings.Cut(s, ",")
+		key, value, hasValue := strings.Cut(opt, "=")
+		if hasValue {
+			value, _, _ = strings.Cut(value, "=")
 		}
+		optionsMap[key] = value
+		if !more {
+			break
+		}
+		s = rest
 	}
 
 	return optionsMap
@@ -248,26 +242,16 @@ func (mi *mountInfoParser) parseOptFieldsComponent(s []string) map[string]string
 	optionalFieldsMap := make(map[string]string)
 
 	for _, field := range s {
-		var value string
-
-		// Separate all optional-fields.
-		optionSplit := strings.SplitN(field, ":", 2)
-
-		// Example: "... master:2 ...""
-		if len(optionSplit) == 2 {
-			value = optionSplit[1]
-		} else {
-			value = ""
-		}
+		key, value, _ := strings.Cut(field, ":")
 
 		// Ensure that only supported options are handled.
-		switch optionSplit[0] {
+		switch key {
 		case
 			"shared",
 			"master",
 			"propagate_from",
 			"unbindable":
-			optionalFieldsMap[optionSplit[0]] = value
+			optionalFieldsMap[key] = value
 		}
 	}
 

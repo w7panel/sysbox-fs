@@ -17,10 +17,35 @@
 package mount
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/nestybox/sysbox-fs/domain"
 )
+
+func TestMountOptionsParsing(t *testing.T) {
+	mi := &mountInfoParser{fetchOptions: true}
+	plain, err := mi.parseComponents("2 1 0:1 / /plain rw - tmpfs tmpfs rw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.OptionalFields != nil {
+		t.Fatalf("optional fields = %v, want nil", plain.OptionalFields)
+	}
+	mount, err := mi.parseComponents("1 0 0:1 / /mnt rw,size=1k,flag,key=a=b,, shared:2 master:3 - tmpfs tmpfs rw,mode=755")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"rw": "", "size": "1k", "flag": "", "key": "a", "": ""}; !reflect.DeepEqual(mount.Options, want) {
+		t.Fatalf("mount options = %v, want %v", mount.Options, want)
+	}
+	if want := map[string]string{"rw": "", "mode": "755"}; !reflect.DeepEqual(mount.VfsOptions, want) {
+		t.Fatalf("vfs options = %v, want %v", mount.VfsOptions, want)
+	}
+	if want := map[string]string{"shared": "2", "master": "3"}; !reflect.DeepEqual(mount.OptionalFields, want) {
+		t.Fatalf("optional fields = %v, want %v", mount.OptionalFields, want)
+	}
+}
 
 var mountInfoData = []byte(`1526 1218 0:86 / / rw,relatime - shiftfs /var/lib/docker/overlay2/85257da8a9d3ce990cc15656845ff381b195501df3aedce24748282556baec11/merged rw
 1531 1526 0:95 / /sys rw,nosuid,nodev,noexec,relatime - sysfs sysfs rw
