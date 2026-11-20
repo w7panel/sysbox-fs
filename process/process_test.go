@@ -972,6 +972,20 @@ func TestProcessCreateStaysLightweight(t *testing.T) {
 	}
 }
 
+func TestGetFd(t *testing.T) {
+	file, err := os.Create(filepath.Join(t.TempDir(), "file"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	p := &process{pid: uint32(os.Getpid())}
+	got, err := p.GetFd(int32(file.Fd()))
+	if err != nil || got != file.Name() {
+		t.Fatalf("GetFd() = %q, %v; want %q", got, err, file.Name())
+	}
+}
+
 func TestProcessCachePidReuse(t *testing.T) {
 	ps := NewProcessService().(*processService)
 

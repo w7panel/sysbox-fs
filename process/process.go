@@ -286,8 +286,12 @@ func (p *process) initCapability() error {
 
 // GetFd() returns a path to the file associated with a process' file descriptor.
 func (p *process) GetFd(fd int32) (string, error) {
-	fdlink := fmt.Sprintf("/proc/%d/fd/%d", p.pid, fd)
-	return os.Readlink(fdlink)
+	var path [64]byte
+	fdlink := append(path[:0], "/proc/"...)
+	fdlink = strconv.AppendUint(fdlink, uint64(p.pid), 10)
+	fdlink = append(fdlink, "/fd/"...)
+	fdlink = strconv.AppendInt(fdlink, int64(fd), 10)
+	return os.Readlink(string(fdlink))
 }
 
 // AdjustPersonality() method's purpose is to modify process' main attributes to
