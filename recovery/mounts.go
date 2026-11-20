@@ -222,14 +222,19 @@ func mountIDAt(dirfd int, path string) (int, error) {
 
 func processAlive(pidfd int) error {
 	fds := []unix.PollFd{{Fd: int32(pidfd), Events: unix.POLLIN}}
-	n, err := unix.Poll(fds, 0)
-	if err != nil {
-		return err
+	for {
+		n, err := unix.Poll(fds, 0)
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if n != 0 {
+			return fmt.Errorf("target process exited: %w", unix.ESRCH)
+		}
+		return nil
 	}
-	if n != 0 {
-		return fmt.Errorf("target process exited: %w", unix.ESRCH)
-	}
-	return nil
 }
 
 // RepairMounts replaces only explicitly allowed, dead sysboxfs devices. Paths
