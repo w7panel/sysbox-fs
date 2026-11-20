@@ -18,6 +18,7 @@ package process
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -78,22 +79,39 @@ func readProcStarttime(pid uint32) uint64 {
 	if err != nil {
 		return 0
 	}
+	return parseProcStarttime(data)
+}
+
+func parseProcStarttime(data []byte) uint64 {
 	// comm (field 2) is in parentheses and may contain ')' chars, so we find
 	// the last ") " to locate the boundary between comm and the remaining fields.
 	// proc(5): fields after ") " are state, ppid, pgrp, session, tty_nr, tpgid,
 	//          flags, minflt, cminflt, majflt, cmajflt, utime, stime, cutime,
 	//          cstime, priority, nice, num_threads, itrealvalue, starttime.
 	// starttime is at index 19 (0-based) from the ") "-split.
-	idx := strings.LastIndex(string(data), ") ")
+	idx := bytes.LastIndex(data, []byte(") "))
 	if idx < 0 {
 		return 0
 	}
-	fields := strings.Fields(string(data[idx+2:]))
-	if len(fields) < 20 {
-		return 0
+	data = data[idx+2:]
+	for field := 0; field < 20; field++ {
+		for len(data) > 0 && (data[0] == ' ' || data[0] == '\t' || data[0] == '\n') {
+			data = data[1:]
+		}
+		if len(data) == 0 {
+			return 0
+		}
+		end := bytes.IndexAny(data, " \t\n")
+		if end < 0 {
+			end = len(data)
+		}
+		if field == 19 {
+			starttime, _ := strconv.ParseUint(string(data[:end]), 10, 64)
+			return starttime
+		}
+		data = data[end:]
 	}
-	starttime, _ := strconv.ParseUint(fields[19], 10, 64)
-	return starttime
+	return 0
 }
 
 func (ps *processService) ProcessCreate(

@@ -20,6 +20,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -1049,6 +1050,34 @@ func TestProcessCreateConcurrent(t *testing.T) {
 	}
 	if results[0].Pid() != pid {
 		t.Fatalf("Pid() = %d, want %d", results[0].Pid(), pid)
+	}
+}
+
+func BenchmarkReadProcStarttime(b *testing.B) {
+	pid := uint32(os.Getpid())
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if readProcStarttime(pid) == 0 {
+			b.Fatal("missing process starttime")
+		}
+	}
+}
+
+func TestParseProcStarttime(t *testing.T) {
+	fields := "S " + strings.Repeat("1 ", 18)
+	for _, tc := range []struct {
+		stat string
+		want uint64
+	}{
+		{"123 (a) b) " + fields + "987 42\n", 987},
+		{"123 (name) " + fields + "0\n", 0},
+		{"123 (name) " + fields + "bad\n", 0},
+		{"123 (name) S " + strings.Repeat("1 ", 18), 0},
+		{"123 (name S " + fields + "987", 0},
+	} {
+		if got := parseProcStarttime([]byte(tc.stat)); got != tc.want {
+			t.Errorf("parseProcStarttime(%q) = %d, want %d", tc.stat, got, tc.want)
+		}
 	}
 }
 
