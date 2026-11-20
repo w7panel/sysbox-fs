@@ -120,7 +120,7 @@ func (u *umountSyscallInfo) process() (*sysResponse, error) {
 		return u.tracer.createContinueResponse(u.reqId), nil
 
 	} else if mip.IsSysboxfsSubmount(u.Target) {
-		logrus.Infof("Rejected unmount of sysbox-fs managed submount at %s",
+		logrus.Debugf("Rejected unmount of sysbox-fs managed submount at %s",
 			u.Target)
 		return u.tracer.createErrorResponse(u.reqId, syscall.EINVAL), nil
 	}
