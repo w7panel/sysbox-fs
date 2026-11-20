@@ -9,9 +9,15 @@ import (
 )
 
 func TestProcSysFsBinfmtMountpoint(t *testing.T) {
-	n := sysio.NewIOService(domain.IOOsFileService).NewIOnode("binfmt_misc", "/proc/sys/fs/binfmt_misc", 0)
-	info, err := ProcSysFs_Handler.Lookup(n, &domain.HandlerRequest{})
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeDir == 0 {
-		t.Fatalf("binfmt_misc mountpoint: info=%v err=%v", info, err)
+	for _, name := range []string{"fs", "binfmt_misc"} {
+		path := "/proc/sys/fs"
+		if name == "binfmt_misc" {
+			path += "/binfmt_misc"
+		}
+		n := sysio.NewIOService(domain.IOOsFileService).NewIOnode(name, path, 0)
+		info, err := ProcSysFs_Handler.Lookup(n, &domain.HandlerRequest{})
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeDir == 0 {
+			t.Fatalf("%s mountpoint: info=%v err=%v", name, info, err)
+		}
 	}
 }

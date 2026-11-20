@@ -109,9 +109,9 @@ func (h *ProcSysFs) Lookup(
 
 		return info, nil
 	}
-	// sysbox-mgr mounts binfmt_misc here. Keep its mountpoint resolvable
-	// even when a freshly mounted procfs does not list the directory.
-	if resource == "binfmt_misc" {
+	// Keep the fixed parent and sysbox-mgr's binfmt_misc mountpoint
+	// resolvable while a replacement FUSE tree is staged.
+	if resource == "fs" || resource == "binfmt_misc" {
 		return &domain.FileInfo{
 			Fname:    resource,
 			Fmode:    os.ModeDir | 0755,
