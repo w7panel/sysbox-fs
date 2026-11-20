@@ -217,10 +217,10 @@ func (h *ProcUptime) readUptime(
 }
 
 func procUptimeData(req *domain.HandlerRequest, ctime, now time.Time) ([]byte, error) {
-	if err := requireRequestResourceView(req); err != nil {
+	if err := requireRequestCgroup(req); err != nil {
 		return nil, err
 	}
-	return procUptimeSnapshots.get(resourceViewKey(req), resourceOwnerKey(req), req.ResourceOwner,
+	return procUptimeSnapshots.get(resourceCgroupKey(req), resourceOwnerKey(req), req.ResourceOwner,
 		req.Offset > 0, now, resourceCacheTTL(procUptimeSnapshotTTL), func() ([]byte, error) {
 			uptime := containerUptime(ctime, now)
 			idle := containerIdleFromReq(req, uptime)

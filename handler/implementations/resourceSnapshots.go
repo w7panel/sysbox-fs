@@ -117,6 +117,14 @@ func resourceViewKey(req *domain.HandlerRequest) string {
 	return resourceViewKeyFor(req, cg, ns)
 }
 
+func resourceCgroupKey(req *domain.HandlerRequest) string {
+	cg := requestCgroup(req)
+	if cg.v2Path == "" && len(cg.v1) == 0 {
+		return fmt.Sprintf("%s\x00pid:%d", resourceOwnerKey(req), req.Pid)
+	}
+	return resourceOwnerKey(req) + "\x00" + cgroupViewKey(cg)
+}
+
 func resourceViewKeyFor(req *domain.HandlerRequest, cg cgroupView, ns string) string {
 	if ns == "" || (cg.v2Path == "" && len(cg.v1) == 0) {
 		return fmt.Sprintf("%s\x00pid:%d", resourceOwnerKey(req), req.Pid)

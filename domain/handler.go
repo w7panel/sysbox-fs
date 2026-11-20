@@ -81,6 +81,9 @@ type EmuResource struct {
 type HandlerRequest struct {
 	resourceViewOnce sync.Once
 	resourceView     ResourceViewIdentity
+	pidnsOnce        sync.Once
+	pidns            string
+	pidnsErr         error
 	ResourceOwner    *ResourceOwner
 	ID               uint64
 	Name             string

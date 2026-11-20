@@ -164,10 +164,20 @@ func (h *readOnlyResource) Read(n domain.IOnodeIface, req *domain.HandlerRequest
 }
 
 func (h *readOnlyResource) snapshotData(req *domain.HandlerRequest) ([]byte, error) {
-	if err := requireRequestResourceView(req); err != nil {
-		return nil, err
+	var key string
+	// Only loadavg's process view depends on the caller's PID namespace.
+	if h.Path == "/proc/loadavg" {
+		if err := requireRequestResourceView(req); err != nil {
+			return nil, err
+		}
+		key = resourceViewKey(req)
+	} else {
+		if err := requireRequestCgroup(req); err != nil {
+			return nil, err
+		}
+		key = resourceCgroupKey(req)
 	}
-	return h.snapshots.get(resourceViewKey(req), resourceOwnerKey(req), req.ResourceOwner,
+	return h.snapshots.get(key, resourceOwnerKey(req), req.ResourceOwner,
 		req.Offset > 0, time.Now(), resourceCacheTTL(resourceSnapshotTTL), func() ([]byte, error) { return h.read(req) })
 }
 

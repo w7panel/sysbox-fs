@@ -26,3 +26,8 @@ func (r *HandlerRequest) ResourceView(load func() ResourceViewIdentity) Resource
 	r.resourceViewOnce.Do(func() { r.resourceView = load() })
 	return r.resourceView
 }
+
+func (r *HandlerRequest) PIDNamespace(load func() (string, error)) (string, error) {
+	r.pidnsOnce.Do(func() { r.pidns, r.pidnsErr = load() })
+	return r.pidns, r.pidnsErr
+}

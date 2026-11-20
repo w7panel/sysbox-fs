@@ -143,6 +143,24 @@ func TestResourceViewKeyIsolation(t *testing.T) {
 	}
 }
 
+func TestCgroupOnlySnapshotKey(t *testing.T) {
+	owner := &domain.ResourceOwner{ID: 1}
+	a := &domain.HandlerRequest{Pid: 1, ResourceOwner: owner}
+	b := &domain.HandlerRequest{Pid: 2, ResourceOwner: owner}
+	c := &domain.HandlerRequest{Pid: 3, ResourceOwner: owner}
+	a.ResourceView(func() domain.ResourceViewIdentity { return domain.ResourceViewIdentity{CgroupV2: "/a"} })
+	b.ResourceView(func() domain.ResourceViewIdentity { return domain.ResourceViewIdentity{CgroupV2: "/a"} })
+	c.ResourceView(func() domain.ResourceViewIdentity { return domain.ResourceViewIdentity{CgroupV2: "/b"} })
+	a.PIDNamespace(func() (string, error) { return "pid:[1]", nil })
+	b.PIDNamespace(func() (string, error) { return "pid:[2]", nil })
+	if resourceCgroupKey(a) != resourceCgroupKey(b) || resourceCgroupKey(a) == resourceCgroupKey(c) {
+		t.Fatal("cgroup-only key does not follow caller cgroup")
+	}
+	if resourceViewKey(a) == resourceViewKey(b) {
+		t.Fatal("loadavg key mixed caller PID namespaces")
+	}
+}
+
 func TestVirtualResourceRejectsMissingRequestIdentity(t *testing.T) {
 	req := &domain.HandlerRequest{Pid: ^uint32(0), Data: make([]byte, 4096)}
 	if err := requireRequestResourceView(req); !errors.Is(err, os.ErrNotExist) {
@@ -172,6 +190,27 @@ func TestRequestResourceViewRejectsMalformedCgroup(t *testing.T) {
 	req := &domain.HandlerRequest{Pid: uint32(os.Getpid())}
 	if err := requireRequestResourceView(req); err != nil {
 		t.Fatalf("live request identity rejected: %v", err)
+	}
+}
+
+func TestSnapshotOnlyReadsNeededNamespace(t *testing.T) {
+	for _, path := range []string{"/proc/meminfo", "/proc/loadavg"} {
+		req := &domain.HandlerRequest{Pid: uint32(os.Getpid())}
+		h := newReadOnlyResource("Test", path, func(*domain.HandlerRequest) ([]byte, error) { return []byte("data"), nil })
+		if _, err := h.snapshotData(req); err != nil {
+			t.Fatal(path, err)
+		}
+		calls := 0
+		ns, err := req.PIDNamespace(func() (string, error) { calls++; return "sentinel", nil })
+		if err != nil {
+			t.Fatal(path, err)
+		}
+		if path == "/proc/meminfo" && (calls != 1 || ns != "sentinel") {
+			t.Fatalf("%s resolved unused pidns: calls=%d ns=%s", path, calls, ns)
+		}
+		if path == "/proc/loadavg" && (calls != 0 || ns == "sentinel") {
+			t.Fatalf("%s did not resolve pidns: calls=%d ns=%s", path, calls, ns)
+		}
 	}
 }
 
