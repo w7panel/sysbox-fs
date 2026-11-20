@@ -213,7 +213,7 @@ func procSwapsData(req *domain.HandlerRequest) []byte {
 	if req == nil {
 		return []byte(out)
 	}
-	info := swapInfoForCgroup(cgroupForReq(req))
+	info := swapInfoForCgroup(cgroupForReq(req), hostSwapTotalKB())
 	if info.totalKB == 0 {
 		return []byte(out)
 	}

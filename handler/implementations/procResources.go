@@ -1262,7 +1262,7 @@ func readMemInfo(req *domain.HandlerRequest) ([]byte, error) {
 		availKB = totalKB - usedKB
 	}
 
-	swapTotal, swapUsed := swapValues(cg)
+	swapTotal, swapUsed := swapValues(cg, host["SwapTotal"])
 	swapFree := uint64(0)
 	if swapTotal > swapUsed {
 		swapFree = swapTotal - swapUsed
@@ -1332,7 +1332,7 @@ func SysinfoMemoryForPid(pid uint32) (SysinfoMemory, bool) {
 		freeKB = totalKB - usedKB
 	}
 
-	swapTotal, swapUsed := swapValues(cg)
+	swapTotal, swapUsed := swapValues(cg, host["SwapTotal"])
 	swapFree := uint64(0)
 	if swapTotal > swapUsed {
 		swapFree = swapTotal - swapUsed
@@ -1506,8 +1506,8 @@ func parseUintValueFromV1(cg cgroupView, ctrl, name string) (uint64, bool) {
 	return 0, false
 }
 
-func swapValues(cg cgroupView) (uint64, uint64) {
-	info := swapInfoForCgroup(cg)
+func swapValues(cg cgroupView, hostSwapTotalKB uint64) (uint64, uint64) {
+	info := swapInfoForCgroup(cg, hostSwapTotalKB)
 	return info.totalKB * 1024, info.usedKB * 1024
 }
 
@@ -1516,12 +1516,11 @@ type swapInfo struct {
 	usedKB  uint64
 }
 
-func swapInfoForCgroup(cg cgroupView) swapInfo {
-	hostSwapTotal := hostSwapTotalKB()
-	if info, ok := swapInfoV2(cg, hostSwapTotal); ok {
+func swapInfoForCgroup(cg cgroupView, hostSwapTotalKB uint64) swapInfo {
+	if info, ok := swapInfoV2(cg, hostSwapTotalKB); ok {
 		return info
 	}
-	if info, ok := swapInfoV1(cg, hostSwapTotal); ok {
+	if info, ok := swapInfoV1(cg, hostSwapTotalKB); ok {
 		return info
 	}
 	return swapInfo{}
