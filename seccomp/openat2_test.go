@@ -17,10 +17,72 @@
 package seccomp
 
 import (
+	"os"
 	"testing"
 
+	"github.com/nestybox/sysbox-fs/domain"
+	"github.com/nestybox/sysbox-fs/process"
+	libseccomp "github.com/seccomp/libseccomp-golang"
 	"golang.org/x/sys/unix"
 )
+
+type openat2ProcessProbe struct {
+	domain.ProcessIface
+	fdPath string
+}
+
+func (p openat2ProcessProbe) GetFd(int32) (string, error)                 { return p.fdPath, nil }
+func (p openat2ProcessProbe) ResolveProcSelf(path string) (string, error) { return path, nil }
+
+func TestRelativeOpenat2OutsideSysboxfsSkipsProcessAttrs(t *testing.T) {
+	si := &openat2SyscallInfo{
+		syscallCtx: syscallCtx{
+			reqId:       42,
+			tracer:      &syscallTracer{},
+			processInfo: openat2ProcessProbe{fdPath: "/sys/fs/cgroup"},
+		},
+		dirfd: 3,
+		path:  "memory.current",
+	}
+	resp, err := si.processOpenat2()
+	if err != nil || resp.ID != 42 || resp.Flags != libseccomp.NotifRespFlagContinue {
+		t.Fatalf("relative non-managed openat2: resp=%+v, err=%v", resp, err)
+	}
+}
+
+func BenchmarkRelativeOpenat2OutsideSysboxfs(b *testing.B) {
+	fd, err := os.Open("/sys/fs/cgroup")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer fd.Close()
+	prs := process.NewProcessService()
+	tracer := &syscallTracer{}
+	pid := uint32(os.Getpid())
+	for _, eager := range []bool{true, false} {
+		name := "lazy"
+		if eager {
+			name = "eager"
+		}
+		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				p := prs.ProcessCreate(pid, 0, 0)
+				si := openat2SyscallInfo{
+					syscallCtx: syscallCtx{pid: pid, tracer: tracer, processInfo: p},
+					dirfd:      int32(fd.Fd()),
+					path:       "memory.current",
+				}
+				if eager {
+					si.uid, si.gid, si.cwd, si.root, si.caps = p.Uid(), p.Gid(), p.Cwd(), p.Root(), p.GetEffCaps()
+				}
+				if _, err := si.processOpenat2(); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
 
 func TestCanEarlyContinueOpenat2(t *testing.T) {
 	tests := []struct {

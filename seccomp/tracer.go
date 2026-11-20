@@ -1407,14 +1407,9 @@ func (t *syscallTracer) processOpenat2(
 		notifyFd: fd,
 	}
 
-	// Collect process attributes required for openat2 execution.
+	// Resolve the path before loading process attributes; most opens continue in the kernel.
 	process := t.service.prs.ProcessCreate(req.Pid, 0, 0)
 	si.processInfo = process
-	si.uid = process.Uid()
-	si.gid = process.Gid()
-	si.cwd = process.Cwd()
-	si.root = process.Root()
-	si.caps = process.GetEffCaps()
 
 	return si.processOpenat2()
 }

@@ -128,6 +128,7 @@ func (si *openat2SyscallInfo) processOpenat2() (*sysResponse, error) {
 		if si.dirfd == unix.AT_FDCWD {
 			// Path is relative to current working directory
 			if !isAbsolute {
+				si.cwd = si.processInfo.Cwd()
 				fullPath = filepath.Join(si.cwd, fullPath)
 			}
 			// If absolute with RESOLVE_IN_ROOT, cwd is treated as root,
@@ -161,6 +162,16 @@ func (si *openat2SyscallInfo) processOpenat2() (*sysResponse, error) {
 
 	// Check if the path is under a sysbox-fs mount
 	if mount.IsSysboxfsMount(fullPath) {
+		// Only managed paths need the caller's credentials and namespace
+		// execution context; most relative opens can continue in the kernel.
+		si.uid = si.processInfo.Uid()
+		si.gid = si.processInfo.Gid()
+		if si.cwd == "" {
+			si.cwd = si.processInfo.Cwd()
+		}
+		si.root = si.processInfo.Root()
+		si.caps = si.processInfo.GetEffCaps()
+
 		logrus.Debugf("openat2(): pid: %d: path under sysbox-fs mount detected: path = %s, flags = %#x, mode = %#x, resolve = %#x",
 			si.pid, fullPath, si.flags, si.mode, si.resolve)
 
